@@ -1,0 +1,95 @@
+# Optional: create .env from .env.example for EMAIL_USER / EMAIL_PASS (EMAIL_SEND jobs).
+services:
+
+  api:
+    build: ./api
+    container_name: nq-api
+    ports:
+      - "9090:9090"
+    restart: on-failure
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/nebula-queue
+      SPRING_DATASOURCE_USERNAME: admin
+      SPRING_DATASOURCE_PASSWORD: admin123
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: admin
+      SPRING_RABBITMQ_PASSWORD: admin123
+      # Shared secret for the Node worker (header X-Worker-Token). Must match WORKER_INTERNAL_TOKEN on worker.
+      APP_WORKER_INTERNAL_TOKEN: dev-worker-token
+      # Optional: first admin account (created only if this email is not already registered).
+      APP_BOOTSTRAP_ADMIN_EMAIL: admin@nebula.local
+      APP_BOOTSTRAP_ADMIN_PASSWORD: changeme123
+    depends_on:
+      - postgres
+      - rabbitmq
+
+  worker:
+    build: ./workers
+    container_name: nq-worker
+    restart: on-failure
+    depends_on:
+      - postgres
+      - rabbitmq
+      - api
+    environment:
+      API_URL: http://api:9090
+      WORKER_INTERNAL_TOKEN: dev-worker-token
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: admin
+      DB_PASSWORD: admin123
+      DB_NAME: nebula-queue
+      NODE_ENV: production
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: admin
+      RABBITMQ_PASS: admin123
+      # Set on the host when running compose, e.g. EMAIL_USER=... EMAIL_PASS=... docker compose up
+      EMAIL_USER: ${EMAIL_USER:-}
+      EMAIL_PASS: ${EMAIL_PASS:-}
+
+  client:
+    build: ./client
+    container_name: nq-client
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+    environment:
+      # Vite dev server proxies /api, /auth, /ws to the API container (browser uses relative URLs).
+      API_PROXY_TARGET: http://api:9090
+
+  postgres:
+    image: postgres:15
+    container_name: nq-postgres
+    environment:
+      POSTGRES_DB: nebula-queue
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  mongo:
+    image: mongo:7
+    container_name: nq-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: nq-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+
+volumes:
+  postgres_data:
+  mongo_data:
