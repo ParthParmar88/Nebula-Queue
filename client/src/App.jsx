@@ -7,7 +7,7 @@ import JobForm from './components/JobForm'
 import JobTable from './components/JobTable'
 
 export default function App() {
-  const { isAuthenticated, isAdmin, email, logout } = useAuth()
+  const { isAuthenticated, isAdmin, email, token, logout } = useAuth()
   const [jobs, setJobs] = useState([])
   const [loadError, setLoadError] = useState(null)
   const [cancellingId, setCancellingId] = useState(null)
@@ -32,26 +32,27 @@ export default function App() {
   }, [isAuthenticated, loadJobs])
 
   function handleJobSubmitted(newJob) {
-    setJobs((prev) => [newJob, ...prev])
+    // The socket may already have delivered a newer version (e.g. PROCESSING) before
+    // the POST response arrived — keep that one.
+    setJobs((prev) => (prev.some((j) => j.id === newJob.id) ? prev : [newJob, ...prev]))
   }
 
-  const handleStatusUpdate = useCallback(({ jobId, status }) => {
+  // Socket messages carry the full job: replace it in place, or add it if it's new
+  const upsertJob = useCallback((job) => {
     setJobs((prev) =>
-      prev.map((job) =>
-        job.id === jobId
-          ? { ...job, status, updatedAt: new Date().toISOString() }
-          : job
-      )
+      prev.some((j) => j.id === job.id)
+        ? prev.map((j) => (j.id === job.id ? job : j))
+        : [job, ...prev]
     )
   }, [])
 
-  useJobSocket(handleStatusUpdate)
+  const socketConnected = useJobSocket({ token, isAdmin, onJobUpdate: upsertJob })
 
   async function handleCancelJob(id) {
     setCancellingId(id)
     try {
       const { data } = await cancelJob(id)
-      setJobs((prev) => prev.map((j) => (j.id === id ? data : j)))
+      upsertJob(data)
     } catch (err) {
       console.error('Cancel failed', err)
     } finally {
@@ -91,8 +92,10 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <span className="hidden sm:inline-flex items-center gap-2 text-sm text-gray-500">
-              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-              Live updates
+              <span
+                className={`w-2 h-2 rounded-full ${socketConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}
+              />
+              {socketConnected ? 'Live updates' : 'Connecting…'}
             </span>
             <button
               type="button"

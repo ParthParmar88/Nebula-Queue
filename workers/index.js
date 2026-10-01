@@ -54,8 +54,6 @@ async function updateJobStatus(jobId, status, result = null) {
 async function processJob(job) {
   console.log(`Processing job: ${job.id} | type: ${job.type}`);
 
-  await updateJobStatus(job.id, 'PROCESSING');
-
   let result = null;
 
   switch (job.type) {
@@ -70,8 +68,7 @@ async function processJob(job) {
 
   await new Promise((resolve) => setTimeout(resolve, 3000));
 
-  await updateJobStatus(job.id, 'COMPLETED', result);
-  console.log(`Done: ${job.id}`);
+  return result;
 }
 
 async function connectRabbitMQ() {
@@ -106,10 +103,41 @@ async function startWorker() {
   channel.consume('job-queue', async (msg) => {
     if (!msg) return;
 
-    const job = JSON.parse(msg.content.toString());
+    // A bad message must still be acked/nacked, or it blocks this worker (prefetch 1).
+    let job;
+    try {
+      job = JSON.parse(msg.content.toString());
+    } catch {
+      console.error('Dropping malformed message (not JSON)');
+      channel.nack(msg, false, false);
+      return;
+    }
+    if (!job?.id) {
+      console.error('Dropping message without a job id');
+      channel.nack(msg, false, false);
+      return;
+    }
+
+    // Claim the job. The API answers 409 if it is no longer PENDING (e.g. the user
+    // cancelled it while it sat in the queue) and 404 if it no longer exists — skip those.
+    try {
+      await updateJobStatus(job.id, 'PROCESSING');
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 409 || status === 404) {
+        console.log(`Skipping job ${job.id}: no longer runnable (HTTP ${status}, probably cancelled)`);
+        channel.ack(msg);
+      } else {
+        console.error(`Could not start job ${job.id}:`, err?.message || err);
+        channel.nack(msg, false, false);
+      }
+      return;
+    }
 
     try {
-      await processJob(job);
+      const result = await processJob(job);
+      await updateJobStatus(job.id, 'COMPLETED', result);
+      console.log(`Done: ${job.id}`);
       channel.ack(msg);
     } catch (err) {
       const reason = err?.message || String(err);

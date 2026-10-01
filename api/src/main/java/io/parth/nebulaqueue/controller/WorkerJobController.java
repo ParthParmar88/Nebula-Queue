@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.parth.nebulaqueue.model.Job;
+import io.parth.nebulaqueue.model.JobStatus;
 import io.parth.nebulaqueue.service.JobService;
 import lombok.RequiredArgsConstructor;
 
@@ -26,7 +27,7 @@ public class WorkerJobController {
     @PatchMapping("/{id}/status")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Job> updateStatus(@PathVariable String id,
-                                            @RequestParam String status,
+                                            @RequestParam JobStatus status,
                                             @RequestParam(required = false) String resultUrl) {
         return ResponseEntity.ok(jobService.updateJobStatus(id, status, resultUrl));
     }

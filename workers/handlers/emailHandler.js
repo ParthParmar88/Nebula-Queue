@@ -9,6 +9,16 @@ const transporter = nodemailer.createTransport({
   }
 })
 
+// The body is user input, so it must not be able to inject HTML (links, images, forms) into the email
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 async function handleEmailSend(job) {
   if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
     throw new Error(
@@ -41,7 +51,7 @@ async function handleEmailSend(job) {
     html: `
       <div style="font-family: Arial, sans-serif; padding: 20px;">
         <h2 style="color: #3b82f6;">📬 Message from Nebula Queue</h2>
-        <p>${body}</p>
+        <p>${escapeHtml(body).replace(/\n/g, '<br/>')}</p>
         <hr/>
         <small style="color: #9ca3af;">Sent via Nebula Queue System</small>
       </div>

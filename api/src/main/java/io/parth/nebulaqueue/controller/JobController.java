@@ -11,7 +11,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import jakarta.validation.Valid;
+import io.parth.nebulaqueue.dto.SubmitJobRequest;
 import io.parth.nebulaqueue.model.Job;
+import io.parth.nebulaqueue.model.JobStatus;
 import io.parth.nebulaqueue.service.JobService;
 
 import lombok.RequiredArgsConstructor;
@@ -29,8 +31,8 @@ public class JobController {
 
     @PostMapping
     @PreAuthorize("isAuthenticated()")
-    public ResponseEntity<Job> submitJob(@Valid @RequestBody Job job) {
-        Job saved = jobService.submitJob(job);
+    public ResponseEntity<Job> submitJob(@Valid @RequestBody SubmitJobRequest request) {
+        Job saved = jobService.submitJob(request);
         log.info("Job submitted: id={} type={} by={}", saved.getId(), saved.getType(), saved.getSubmittedBy());
         return ResponseEntity.ok(saved);
     }
@@ -56,7 +58,7 @@ public class JobController {
     @PatchMapping("/{id}/status")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Job> updateStatus(@PathVariable String id,
-                                            @RequestParam String status,
+                                            @RequestParam JobStatus status,
                                             @RequestParam(required = false) String resultUrl) {
         return ResponseEntity.ok(jobService.updateJobStatus(id, status, resultUrl));
     }

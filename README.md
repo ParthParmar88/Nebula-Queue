@@ -26,7 +26,9 @@ Nebula Queue is a queue-based full-stack application for submitting jobs, proces
 3. API publishes the job to RabbitMQ (`job-queue`).
 4. Worker consumes the job and processes it by type.
 5. Worker reports status to the API (`PATCH /internal/worker/jobs/{id}/status` with `X-Worker-Token`).
-6. API publishes status over WebSocket (`/topic/jobs`) to connected clients.
+6. API pushes the updated job over WebSocket to its owner (`/user/queue/jobs`) and to admins (`/topic/admin/jobs`).
+
+If a job is cancelled while still in the queue, the API rejects the worker's `PROCESSING` update with `409` and the worker skips the job.
 
 ## Services and Ports
 
@@ -147,18 +149,25 @@ Worker currently has no implemented automated test script.
 
 ### Jobs
 
-- `POST /api/jobs` (authenticated)
-- `GET /api/jobs` (admin)
-- `GET /api/jobs/my` (authenticated)
+- `POST /api/jobs` (authenticated; body `{"type": "...", "payload": "..."}` — `type` is one of `BATCH`, `IMAGE_RESIZE`, `PDF_GENERATE`, `EMAIL_SEND`; `payload` is an optional JSON string)
+- `GET /api/jobs` (admin; newest first)
+- `GET /api/jobs/my` (authenticated; newest first)
 - `GET /api/jobs/{id}` (authenticated)
 - `PATCH /api/jobs/{id}/status` (admin JWT; query params `status`, optional `resultUrl`)
 - `PATCH /internal/worker/jobs/{id}/status` (background worker; header `X-Worker-Token` must match `app.worker.internal-token`; same query params as above)
 - `POST /api/jobs/{id}/cancel` (authenticated; only while `PENDING`)
 
-### WebSocket
+Statuses: `PENDING → PROCESSING → COMPLETED | FAILED`, or `PENDING → CANCELLED`.
+
+Errors return JSON `{"status", "error", "message", "timestamp"}`: `400` invalid input, `401` missing/expired token or wrong password, `403` not your job / not admin, `404` job not found, `409` invalid status change (e.g. cancelling a job that already started).
+
+### WebSocket (STOMP over SockJS)
 
 - handshake endpoint: `/ws`
-- topic subscription: `/topic/jobs`
+- the STOMP `CONNECT` frame must include the header `Authorization: Bearer <jwt>`
+- subscribe to `/user/queue/jobs` for your own jobs, or `/topic/admin/jobs` (admins only) for all jobs
+- each message is the full job object (including `status`, `resultUrl`, timestamps)
+- clients cannot send messages; subscriptions to any other destination are rejected
 
 ## Configuration
 
@@ -231,7 +240,8 @@ Example payload in the UI:
 - **Worker not consuming jobs:** verify `job-queue` exists and worker can connect to RabbitMQ.
 - **Worker cannot update status (401/503):** ensure `WORKER_INTERNAL_TOKEN` matches `APP_WORKER_INTERNAL_TOKEN` / `app.worker.internal-token`, and the worker calls `PATCH /internal/worker/jobs/{id}/status` with query params (not a JSON body).
 - **EMAIL_SEND jobs fail:** set `EMAIL_USER` and `EMAIL_PASS` in `.env` (see [EMAIL_SEND](#email_send-gmail)); use a Gmail **app password**, not your normal login password. Check `docker logs nq-worker` for `Job failed (...):`.
-- **Integration tests:** `./gradlew test` skips full Spring context unless you set `RUN_INTEGRATION_TESTS=true` (requires Postgres and RabbitMQ).
+- **Integration tests:** `./gradlew test` runs the unit tests and skips the full Spring context test unless you set `RUN_INTEGRATION_TESTS=true` (requires Postgres and RabbitMQ).
+- **"Connecting…" never turns into "Live updates":** the WebSocket login failed — usually an expired token. Log out and back in; check the browser console for `WebSocket error`.
 
 ## Security Notice
 

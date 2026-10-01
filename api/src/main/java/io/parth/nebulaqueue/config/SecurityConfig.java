@@ -10,7 +10,9 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 import io.parth.nebulaqueue.util.JwtFilter;
@@ -29,10 +31,12 @@ public class SecurityConfig {
             .cors(cors -> {})
             .csrf(csrf -> csrf.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            // missing/expired JWT → 401 (default would be 403), so the client knows to log out
+            .exceptionHandling(e -> e.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/auth/**").permitAll()       // login, register open
                 .requestMatchers("/actuator/health").permitAll()
-                .requestMatchers("/ws/**").permitAll()
+                .requestMatchers("/ws/**").permitAll()         // STOMP CONNECT is authenticated by WebSocketAuthInterceptor
                 .requestMatchers(
                     "/v3/api-docs/**",
                     "/swagger-ui/**",

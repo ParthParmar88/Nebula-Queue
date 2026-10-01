@@ -6,7 +6,6 @@ import java.util.List;
 
 public interface JobRepository extends JpaRepository<Job, String> {
 
-    List<Job> findByCreatedByOrderByCreatedAtDesc(String createdBy);
-    List<Job> findBySubmittedBy(String submittedBy);
-    
+    List<Job> findBySubmittedByOrderByCreatedAtDesc(String submittedBy);
+
 }

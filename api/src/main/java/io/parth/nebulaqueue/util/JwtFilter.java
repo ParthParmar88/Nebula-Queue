@@ -12,6 +12,7 @@ import org.springframework.security.web.authentication.WebAuthenticationDetailsS
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import jakarta.servlet.FilterChain;
 import java.io.IOException;
 import io.jsonwebtoken.JwtException;
@@ -51,8 +52,8 @@ public class JwtFilter extends OncePerRequestFilter {
                     SecurityContextHolder.getContext().setAuthentication(authToken);
                 }
             }
-        } catch (JwtException e) {
-            // invalid token — just don't set authentication, let Security deny it
+        } catch (JwtException | UsernameNotFoundException e) {
+            // invalid token or deleted user — just don't set authentication, let Security deny it
         }
 
         chain.doFilter(request, response);

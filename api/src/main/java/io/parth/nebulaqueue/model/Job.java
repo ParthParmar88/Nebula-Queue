@@ -1,10 +1,9 @@
 package io.parth.nebulaqueue.model;
 
 import jakarta.persistence.*;
-import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 @Entity
 @Table(name = "jobs")
@@ -16,12 +15,13 @@ public class Job {
     @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
 
+    @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    @NotBlank
-    private String type;         // "IMAGE_RESIZE", "PDF_GENERATE", "EMAIL_SEND"
+    private JobType type;
 
+    @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private String status;       // "PENDING", "PROCESSING", "COMPLETED", "FAILED"
+    private JobStatus status;
 
     @Column(columnDefinition = "TEXT")
     private String payload;      // job input data stored as JSON string
@@ -29,39 +29,26 @@ public class Job {
     @Column(columnDefinition = "TEXT")
     private String resultUrl;    // where the output file lives after completion
 
-    private String createdBy;    // which user submitted this job
+    private String submittedBy;  // email from JWT
 
-    private LocalDateTime createdAt;
-    private LocalDateTime updatedAt;
-
-    private String submittedBy;       // email from JWT
-    private LocalDateTime completedAt;
+    // Instant (UTC) so the JSON always carries a timezone ("...Z") and the browser
+    // shows the right local time regardless of the server's timezone.
+    private Instant createdAt;
+    private Instant updatedAt;
+    private Instant completedAt;
 
     @PrePersist
     public void onCreate() {
-        this.createdAt = LocalDateTime.now();
-        this.updatedAt = LocalDateTime.now();
-        this.status = "PENDING";
+        Instant now = Instant.now();
+        this.createdAt = now;
+        this.updatedAt = now;
+        if (this.status == null) {
+            this.status = JobStatus.PENDING;
+        }
     }
 
     @PreUpdate
     public void onUpdate() {
-        this.updatedAt = LocalDateTime.now();
-    }
-
-    public String getSubmittedBy() {
-        return submittedBy;
-    }
-    
-    public void setSubmittedBy(String submittedBy) {
-        this.submittedBy = submittedBy;
-    }
-    
-    public LocalDateTime getCompletedAt() {
-        return completedAt;
-    }
-    
-    public void setCompletedAt(LocalDateTime completedAt) {
-        this.completedAt = completedAt;
+        this.updatedAt = Instant.now();
     }
 }

@@ -1,24 +1,42 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Client } from '@stomp/stompjs'
 import SockJS from 'sockjs-client'
 
-export function useJobSocket(onStatusUpdate) {
+// Admins get every job's updates; everyone else only their own jobs.
+const USER_DESTINATION = '/user/queue/jobs'
+const ADMIN_DESTINATION = '/topic/admin/jobs'
+
+/**
+ * Subscribes to live job updates. Each message is the full job object.
+ * Returns whether the socket is currently connected.
+ */
+export function useJobSocket({ token, isAdmin, onJobUpdate }) {
+  const [connected, setConnected] = useState(false)
+
   useEffect(() => {
+    if (!token) return
+
     const client = new Client({
       webSocketFactory: () => new SockJS('/ws'),
+      // The API authenticates the STOMP CONNECT frame with the same JWT as REST calls
+      connectHeaders: { Authorization: `Bearer ${token}` },
       onConnect: () => {
-        console.log('🔌 WebSocket connected')
-        // Listen for status updates from Spring Boot
-        client.subscribe('/topic/jobs', (message) => {
-          const update = JSON.parse(message.body)
-          onStatusUpdate(update)  // { jobId, status }
+        setConnected(true)
+        client.subscribe(isAdmin ? ADMIN_DESTINATION : USER_DESTINATION, (message) => {
+          onJobUpdate(JSON.parse(message.body))
         })
       },
-      onDisconnect: () => console.log('🔌 WebSocket disconnected'),
+      onWebSocketClose: () => setConnected(false),
+      onStompError: (frame) => console.error('🔌 WebSocket error:', frame.headers.message),
       reconnectDelay: 5000,  // auto reconnect after 5s
     })
 
     client.activate()
-    return () => client.deactivate()  // cleanup on unmount
-  }, [onStatusUpdate])
+    return () => {
+      setConnected(false)
+      client.deactivate()  // cleanup on logout/unmount
+    }
+  }, [token, isAdmin, onJobUpdate])
+
+  return connected
 }
