@@ -1,16 +1,57 @@
-# React + Vite
+# Nebula Queue — client
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + Vite + Tailwind CSS. Run it with `npm run dev` (see the root README for the full stack).
 
-Currently, two official plugins are available:
+## Structure
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```text
+src/
+├── api/            HTTP calls (axios) and error-message helpers
+├── components/
+│   ├── ui/         Design-system primitives: Button, Field/Input, Dialog, DropdownMenu,
+│   │               Tabs, Tooltip, Alert, Badge, Skeleton, EmptyState, Pagination…
+│   ├── layout/     App shell: sidebar, mobile nav, user menu, connection status
+│   └── jobs/       Job-specific pieces: table, New job dialog, cancel dialog, timeline
+├── context/        Auth, theme, toasts, shell (React context + providers)
+├── hooks/          Data (useJobs), live updates (useJobSocket), modal/hotkey/clock helpers
+├── lib/            Router, formatting, job-type metadata, `cn()` class helper
+└── pages/          Overview, Jobs, Job detail, Sign in, Not found
+```
 
-## React Compiler
+## Routes
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Hash-based, so the app works on any static host without rewrites:
 
-## Expanding the ESLint configuration
+| Path | Page |
+| --- | --- |
+| `#/` | Overview — counts, recent jobs, breakdown by type |
+| `#/jobs?status=&q=&page=&size=` | Jobs — filter, search and pagination live in the URL |
+| `#/jobs/:id` | Job detail — status, lifecycle, payload, result |
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Data flow
+
+- **React Query** owns server state. `useJobsQuery` / `useJobQuery` load over REST.
+- **WebSocket** (STOMP over SockJS) messages carry the full job; `useApplyJobUpdate` merges
+  them into the same cache, keeping whichever copy has the newer `updatedAt`. Every page
+  updates live from one source.
+- Mutations (`useSubmitJob`, `useCancelJob`) write their responses into the cache the same way.
+
+## Design system
+
+- **Tokens** are CSS variables in `src/index.css` (light + dark), exposed as Tailwind colors in
+  `tailwind.config.js`: `bg`, `surface`, `border`, `fg`, `accent`, and `success` / `warning` /
+  `danger` / `info`. Use these — not Tailwind palette colors — so both themes stay correct.
+- **Type:** Inter for UI, JetBrains Mono for IDs and code. Sizes: `text-2xs`, `text-xs`,
+  `text-13` (dense UI), `text-sm` (body), `text-xl`/`2xl` (page titles).
+- **Radius:** `rounded-md` for controls, `rounded-lg` for cards and dialogs, `rounded-full` for dots/avatars.
+- **Variants** for buttons, fields and badges live in `components/ui/variants.js`.
+- Theme follows the OS by default; users can pin light/dark from the account menu.
+
+## Keyboard
+
+| Key | Action |
+| --- | --- |
+| `N` | New job (anywhere) |
+| `/` | Focus search on the Jobs page |
+| `Ctrl`/`⌘` + `Enter` | Submit the New job form |
+| `Esc` | Close dialogs and menus; clear search |

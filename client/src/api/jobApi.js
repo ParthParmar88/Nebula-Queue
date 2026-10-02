@@ -7,4 +7,6 @@ export const getMyJobs = () => http.get('/api/jobs/my')
 
 export const getAllJobs = () => http.get('/api/jobs')
 
-export const cancelJob = (id) => http.post(`/api/jobs/${id}/cancel`)
+export const getJob = (id) => http.get(`/api/jobs/${encodeURIComponent(id)}`)
+
+export const cancelJob = (id) => http.post(`/api/jobs/${encodeURIComponent(id)}/cancel`)

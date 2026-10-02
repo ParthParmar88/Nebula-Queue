@@ -1,0 +1,69 @@
+const dateTimeFormat = new Intl.DateTimeFormat(undefined, {
+  dateStyle: 'medium',
+  timeStyle: 'medium',
+})
+
+const relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+
+const RELATIVE_UNITS = [
+  ['year', 365 * 24 * 3600],
+  ['month', 30 * 24 * 3600],
+  ['week', 7 * 24 * 3600],
+  ['day', 24 * 3600],
+  ['hour', 3600],
+  ['minute', 60],
+]
+
+/** "Sep 30, 2026, 4:05:12 PM" in the viewer's locale and timezone. */
+export function formatDateTime(iso) {
+  if (!iso) return '—'
+  return dateTimeFormat.format(new Date(iso))
+}
+
+/** "just now", "5 minutes ago", "yesterday"… relative to `now` (ms). */
+export function formatRelative(iso, now) {
+  if (!iso) return '—'
+  const seconds = Math.round((new Date(iso).getTime() - now) / 1000)
+  if (Math.abs(seconds) < 45) return 'just now'
+  for (const [unit, size] of RELATIVE_UNITS) {
+    if (Math.abs(seconds) >= size || unit === 'minute') {
+      return relativeFormat.format(Math.round(seconds / size), unit)
+    }
+  }
+  return 'just now'
+}
+
+/** Milliseconds → "850 ms", "3.2 s", "4 min 12 s". */
+export function formatDuration(ms) {
+  if (ms == null || Number.isNaN(ms) || ms < 0) return '—'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`
+  const minutes = Math.floor(ms / 60_000)
+  const seconds = Math.round((ms % 60_000) / 1000)
+  return seconds ? `${minutes} min ${seconds} s` : `${minutes} min`
+}
+
+export function shortId(id) {
+  return id ? id.slice(0, 8) : ''
+}
+
+/** Pretty-print a JSON string; returns the input unchanged if it isn't valid JSON. */
+export function prettyJson(text) {
+  if (!text) return ''
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    return text
+  }
+}
+
+export function isHttpUrl(text) {
+  return typeof text === 'string' && /^https?:\/\/\S+$/i.test(text)
+}
+
+export function initials(email) {
+  if (!email) return '?'
+  const name = email.split('@')[0]
+  const parts = name.split(/[._-]+/).filter(Boolean)
+  return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || name[0].toUpperCase()
+}

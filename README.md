@@ -5,7 +5,7 @@ Nebula Queue is a queue-based full-stack application for submitting jobs, proces
 ## Tech Stack
 
 - **API:** Java 21, Spring Boot, Spring Security (JWT), Spring Data JPA, RabbitMQ, WebSocket/STOMP
-- **Client:** React (Vite), Axios, SockJS + STOMP, Tailwind
+- **Client:** React (Vite), TanStack Query, Axios, SockJS + STOMP, Tailwind — see [client/README.md](client/README.md) for structure and design system
 - **Worker:** Node.js, amqplib, axios, nodemailer
 - **Infra:** Docker Compose, PostgreSQL, RabbitMQ, MongoDB (currently not used by core flow)
 
