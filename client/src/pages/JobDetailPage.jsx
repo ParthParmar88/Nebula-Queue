@@ -1,7 +1,14 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { ArrowLeft, ArrowUpRight, FileQuestion, Lock, RefreshCw } from 'lucide-react'
 import { getErrorMessage, getErrorStatus } from '../api/errors'
-import { AiOutputCard, PromptCard, UsageCard } from '../components/jobs/AiJobPanels'
+import {
+  AiOutputCard,
+  IngestDocumentCard,
+  PromptCard,
+  QuestionCard,
+  SourcesCard,
+  UsageCard,
+} from '../components/jobs/AiJobPanels'
 import CancelJobDialog from '../components/jobs/CancelJobDialog'
 import JobTimeline from '../components/jobs/JobTimeline'
 import JobTypeIcon from '../components/jobs/JobTypeIcon'
@@ -18,13 +25,15 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useJobQuery } from '../hooks/useJobs'
 import { useNow } from '../hooks/useNow'
 import { formatDateTime, formatDuration, formatRelative, isHttpUrl, prettyJson, shortId } from '../lib/format'
-import { isAiJob, jobTypeMeta, STATUS_LABELS } from '../lib/jobTypes'
+import { isAiJob, isStreamingJob, jobTypeMeta, parseSources, STATUS_LABELS } from '../lib/jobTypes'
 
 export default function JobDetailPage({ id }) {
   const { data: job, isPending, isError, error, refetch, isFetching } = useJobQuery(id)
   const [cancelOpen, setCancelOpen] = useState(false)
   const meta = job ? jobTypeMeta(job.type) : null
   const ai = isAiJob(job)
+  const hasResponse = job && job.status !== 'CANCELLED' && job.status !== 'FAILED'
+  const sources = useMemo(() => parseSources(job?.sources), [job?.sources])
   useDocumentTitle(meta ? `${meta.label} ${shortId(id)}` : `Job ${shortId(id)}`)
 
   const breadcrumbs = [{ label: 'Jobs', to: '/jobs' }, { label: shortId(id) }]
@@ -99,10 +108,18 @@ export default function JobDetailPage({ id }) {
 
         <div className="grid items-start gap-6 lg:grid-cols-3">
           <div className="flex min-w-0 flex-col gap-6 lg:col-span-2">
-            {ai ? (
+            {/* failed/cancelled jobs have no response; the status banner explains why */}
+            {job.type === 'AI_ASK' ? (
               <>
-                {/* failed/cancelled jobs have no response; the status banner explains why */}
-                {job.status !== 'CANCELLED' && job.status !== 'FAILED' && <AiOutputCard job={job} />}
+                {hasResponse && <AiOutputCard job={job} sources={sources} />}
+                <QuestionCard payload={job.payload} />
+                {hasResponse && <SourcesCard sources={sources} status={job.status} />}
+              </>
+            ) : job.type === 'INGEST_DOCUMENT' ? (
+              <IngestDocumentCard payload={job.payload} result={job.status === 'COMPLETED' ? job.resultUrl : null} />
+            ) : ai ? (
+              <>
+                {hasResponse && <AiOutputCard job={job} />}
                 <PromptCard payload={job.payload} />
               </>
             ) : (
@@ -155,7 +172,7 @@ function StatusBanner({ job }) {
         </Alert>
       )
     case 'PROCESSING':
-      return isAiJob(job) ? null : (
+      return isStreamingJob(job) ? null : (
         <Alert tone="info" title="Processing">
           A worker is running this job now. The result will appear here when it finishes.
         </Alert>

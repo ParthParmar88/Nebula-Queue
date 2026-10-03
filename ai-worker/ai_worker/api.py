@@ -15,7 +15,7 @@ class JobNotRunnable(Exception):
 
 class ApiClient:
     def __init__(self, base_url: str, token: str, client: httpx.AsyncClient | None = None) -> None:
-        self._client = client or httpx.AsyncClient(base_url=base_url, timeout=15.0)
+        self._client = client or httpx.AsyncClient(base_url=base_url, timeout=30.0)
         self._headers = {"X-Worker-Token": token}
 
     async def start(self, job_id: str) -> None:
@@ -37,6 +37,7 @@ class ApiClient:
         model: str | None = None,
         usage: Usage | None = None,
         cost: Decimal | None = None,
+        sources: str | None = None,
     ) -> None:
         body = {
             "status": status,
@@ -46,9 +47,32 @@ class ApiClient:
             "inputTokens": usage.input_tokens if usage else None,
             "outputTokens": usage.output_tokens if usage else None,
             "costUsd": str(cost) if cost is not None else None,
+            "sources": sources,
         }
         response = await self._client.post(
             f"/internal/worker/jobs/{job_id}/finish",
+            json={k: v for k, v in body.items() if v is not None},
+            headers=self._headers,
+        )
+        response.raise_for_status()
+
+    async def download_document(self, document_id: str) -> bytes:
+        response = await self._client.get(f"/internal/worker/documents/{document_id}/file", headers=self._headers)
+        response.raise_for_status()
+        return response.content
+
+    async def report_indexed(
+        self,
+        document_id: str,
+        *,
+        status: str,
+        page_count: int | None = None,
+        chunk_count: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        body = {"status": status, "pageCount": page_count, "chunkCount": chunk_count, "error": error}
+        response = await self._client.post(
+            f"/internal/worker/documents/{document_id}/indexed",
             json={k: v for k, v in body.items() if v is not None},
             headers=self._headers,
         )

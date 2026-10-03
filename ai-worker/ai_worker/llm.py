@@ -26,12 +26,27 @@ class Usage:
 StreamEvent = Union[TextDelta, Usage]
 
 
+@dataclass(frozen=True)
+class Embeddings:
+    vectors: list[list[float]]
+    tokens: int
+
+
 class LLMProvider(Protocol):
     def stream(
         self, *, model: str, prompt: str, system: str | None, max_output_tokens: int
     ) -> AsyncIterator[StreamEvent]:
         """Yield TextDelta events as text is generated, then a Usage event."""
         ...
+
+    async def embed(self, texts: list[str], *, model: str, dimensions: int) -> Embeddings:
+        """One vector per input text, in order."""
+        ...
+
+
+# Inputs per embeddings request — well under the API's limits, and small enough that a
+# failure doesn't waste much work.
+EMBED_BATCH_SIZE = 64
 
 
 class OpenAIProvider:
@@ -65,6 +80,17 @@ class OpenAIProvider:
                     yield TextDelta(content)
             if chunk.usage:
                 yield Usage(chunk.usage.prompt_tokens, chunk.usage.completion_tokens)
+
+    async def embed(self, texts: list[str], *, model: str, dimensions: int) -> Embeddings:
+        vectors: list[list[float]] = []
+        tokens = 0
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = texts[start : start + EMBED_BATCH_SIZE]
+            response = await self._client.embeddings.create(model=model, input=batch, dimensions=dimensions)
+            # The API returns items with an index; sort to be safe rather than trust order
+            vectors.extend(item.embedding for item in sorted(response.data, key=lambda item: item.index))
+            tokens += response.usage.total_tokens
+        return Embeddings(vectors=vectors, tokens=tokens)
 
     async def aclose(self) -> None:
         await self._client.close()

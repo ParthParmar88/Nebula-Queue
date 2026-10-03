@@ -49,12 +49,14 @@ services:
       EMAIL_USER: ${EMAIL_USER:-}
       EMAIL_PASS: ${EMAIL_PASS:-}
 
-  # Python worker for AI jobs (consumes ai-job-queue, streams tokens back via job-events)
+  # Python worker for AI jobs (consumes ai-job-queue, streams tokens back via job-events).
+  # Owns the pgvector index (document_chunks) for document Q&A.
   ai-worker:
     build: ./ai-worker
     container_name: nq-ai-worker
     restart: on-failure
     depends_on:
+      - postgres
       - rabbitmq
       - api
     environment:
@@ -64,11 +66,18 @@ services:
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: admin
       RABBITMQ_PASS: admin123
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: admin
+      DB_PASSWORD: admin123
+      DB_NAME: nebula-queue
       # From .env — see .env.example
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_PRICE_INPUT_PER_1M: ${OPENAI_PRICE_INPUT_PER_1M:-}
       OPENAI_PRICE_OUTPUT_PER_1M: ${OPENAI_PRICE_OUTPUT_PER_1M:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      OPENAI_PRICE_EMBEDDING_PER_1M: ${OPENAI_PRICE_EMBEDDING_PER_1M:-}
 
   client:
     build: ./client
@@ -82,7 +91,8 @@ services:
       API_PROXY_TARGET: http://api:9090
 
   postgres:
-    image: postgres:15
+    # Postgres 15 with the pgvector extension (same major version, so existing data is kept)
+    image: pgvector/pgvector:pg15
     container_name: nq-postgres
     environment:
       POSTGRES_DB: nebula-queue

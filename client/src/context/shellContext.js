@@ -2,7 +2,7 @@ import { createContext, useContext } from 'react'
 
 /**
  * App-shell services available to every page:
- * `{ openNewJob(), realtimeConnected }`
+ * `{ openNewJob(preset?), realtimeConnected }` — preset: `{ type, documentIds }`
  */
 export const ShellContext = createContext(null)
 

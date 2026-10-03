@@ -13,6 +13,7 @@ from .api import ApiClient
 from .config import Settings
 from .llm import OpenAIProvider
 from .runner import JobRunner
+from .vector_store import PgVectorStore
 
 # Must match RabbitMQConfig on the API
 AI_QUEUE = "ai-job-queue"
@@ -36,6 +37,19 @@ async def connect_with_retry(url: str, attempts: int = 20, delay: float = 3.0) -
     raise RuntimeError("unreachable")
 
 
+async def connect_store_with_retry(settings: Settings, attempts: int = 20, delay: float = 3.0) -> PgVectorStore:
+    """Postgres may still be starting; the store also creates its table and index on connect."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return await PgVectorStore.connect(settings.database_url, settings.embedding_dimensions)
+        except Exception as err:
+            if attempt == attempts:
+                raise
+            log.info("Postgres not ready (%s). Retrying in %.0fs… (%d/%d)", err, delay, attempt, attempts)
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable")
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = Settings.from_env()
@@ -47,6 +61,7 @@ async def main() -> None:
         log.warning("OPENAI_API_KEY is not set — AI jobs will fail with a clear error until it is")
 
     api = ApiClient(settings.api_url, settings.worker_token)
+    store = await connect_store_with_retry(settings)
     connection = await connect_with_retry(settings.rabbitmq_url)
 
     async with connection:
@@ -62,7 +77,7 @@ async def main() -> None:
                 routing_key=STREAM_ROUTING_KEY,
             )
 
-        runner = JobRunner(settings, api, provider, publish_event)
+        runner = JobRunner(settings, api, provider, publish_event, store)
 
         async def on_message(message: aio_pika.abc.AbstractIncomingMessage) -> None:
             if await runner.handle(message.body):
@@ -84,6 +99,7 @@ async def main() -> None:
         log.info("Shutting down")
 
     await api.aclose()
+    await store.close()
     if provider is not None:
         await provider.aclose()
 

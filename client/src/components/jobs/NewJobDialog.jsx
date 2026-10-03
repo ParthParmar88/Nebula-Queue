@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import { getErrorMessage } from '../../api/errors'
 import { useToast } from '../../context/toastContext.js'
+import { useDocumentsQuery } from '../../hooks/useDocuments'
 import { useSubmitJob } from '../../hooks/useJobs'
 import { cn } from '../../lib/cn'
 import { formatNumber, shortId } from '../../lib/format'
@@ -14,18 +15,19 @@ import { Field, Input, Textarea } from '../ui/Field'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-export default function NewJobDialog({ open, onClose }) {
+export default function NewJobDialog({ open, preset, onClose }) {
   // Mount the form only while open, so every opening starts from a clean slate
-  return open ? <NewJobForm onClose={onClose} /> : null
+  return open ? <NewJobForm preset={preset ?? {}} onClose={onClose} /> : null
 }
 
-function NewJobForm({ onClose }) {
+function NewJobForm({ preset, onClose }) {
   const formId = useId()
   const { toast } = useToast()
   const submit = useSubmitJob()
 
-  const [type, setType] = useState('AI_GENERATE')
+  const [type, setType] = useState(preset.type ?? 'AI_GENERATE')
   const [ai, setAi] = useState({ prompt: '', system: '' })
+  const [ask, setAsk] = useState({ question: '', documentIds: preset.documentIds ?? [] })
   const [email, setEmail] = useState({ to: '', subject: '', body: '' })
   const [payload, setPayload] = useState('')
   const [errors, setErrors] = useState({})
@@ -38,6 +40,9 @@ function NewJobForm({ onClose }) {
       if (!ai.prompt.trim()) next.prompt = 'Write a prompt.'
       else if (ai.prompt.length > AI_LIMITS.promptChars) next.prompt = `Keep the prompt under ${formatNumber(AI_LIMITS.promptChars)} characters.`
       if (ai.system.length > AI_LIMITS.systemChars) next.system = `Keep instructions under ${formatNumber(AI_LIMITS.systemChars)} characters.`
+    } else if (type === 'AI_ASK') {
+      if (!ask.question.trim()) next.question = 'Write a question.'
+      else if (ask.question.length > AI_LIMITS.questionChars) next.question = `Keep the question under ${formatNumber(AI_LIMITS.questionChars)} characters.`
     } else if (type === 'EMAIL_SEND') {
       if (!EMAIL_PATTERN.test(email.to.trim())) next.to = 'Enter a valid email address.'
       if (!email.subject.trim()) next.subject = 'Add a subject.'
@@ -56,6 +61,10 @@ function NewJobForm({ onClose }) {
   function buildPayload() {
     if (type === 'AI_GENERATE') {
       return JSON.stringify({ prompt: ai.prompt, ...(ai.system.trim() ? { system: ai.system.trim() } : {}) })
+    }
+    if (type === 'AI_ASK') {
+      // No selection = the API searches all of the user's ready documents
+      return JSON.stringify({ question: ask.question, ...(ask.documentIds.length ? { documentIds: ask.documentIds } : {}) })
     }
     if (type === 'EMAIL_SEND') {
       return JSON.stringify({ to: email.to.trim(), subject: email.subject.trim(), body: email.body })
@@ -77,10 +86,14 @@ function NewJobForm({ onClose }) {
       {
         onSuccess: (job) => {
           onClose()
-          if (meta.ai) {
+          if (meta.streams) {
             // The interesting part of an AI job is watching it write — go straight there
             navigate(`/jobs/${job.id}`)
-            toast({ title: 'Generating…', description: 'The response streams in as the model writes it.' })
+            toast(
+              type === 'AI_ASK'
+                ? { title: 'Searching your documents…', description: 'The answer streams in with citations.' }
+                : { title: 'Generating…', description: 'The response streams in as the model writes it.' }
+            )
           } else {
             toast({
               title: 'Job submitted',
@@ -118,7 +131,7 @@ function NewJobForm({ onClose }) {
         <>
           <Button onClick={onClose}>Cancel</Button>
           <Button type="submit" form={formId} variant="primary" loading={submit.isPending}>
-            {meta.ai ? 'Generate' : 'Submit job'}
+            {type === 'AI_ASK' ? 'Ask' : meta.streams ? 'Generate' : 'Submit job'}
           </Button>
         </>
       }
@@ -222,6 +235,19 @@ function NewJobForm({ onClose }) {
           </div>
         )}
 
+        {type === 'AI_ASK' && (
+          <AskFields
+            ask={ask}
+            errors={errors}
+            onQuestion={(value) => updateField(setAsk, 'question', value)}
+            onDocuments={(documentIds) => setAsk((a) => ({ ...a, documentIds }))}
+            onGoToDocuments={() => {
+              onClose()
+              navigate('/documents')
+            }}
+          />
+        )}
+
         {type === 'EMAIL_SEND' && (
           <div className="flex flex-col gap-4">
             <Field label="To" error={errors.to}>
@@ -281,6 +307,80 @@ function NewJobForm({ onClose }) {
         )}
       </form>
     </Dialog>
+  )
+}
+
+/** Question + which documents to search (none ticked = all ready documents). */
+function AskFields({ ask, errors, onQuestion, onDocuments, onGoToDocuments }) {
+  const { data: documents, isPending } = useDocumentsQuery()
+  const ready = (documents ?? []).filter((d) => d.status === 'READY')
+  const indexing = (documents ?? []).filter((d) => d.status === 'PROCESSING').length
+
+  function toggle(id) {
+    onDocuments(ask.documentIds.includes(id) ? ask.documentIds.filter((x) => x !== id) : [...ask.documentIds, id])
+  }
+
+  if (!isPending && ready.length === 0) {
+    return (
+      <Alert
+        tone="info"
+        title={indexing ? 'Your documents are still being indexed' : 'No documents to search yet'}
+        action={
+          <Button size="sm" onClick={onGoToDocuments}>
+            {indexing ? 'View documents' : 'Upload a document'}
+          </Button>
+        }
+      >
+        {indexing
+          ? 'You can ask questions as soon as indexing finishes — usually a few seconds.'
+          : 'Upload a PDF, .txt or .md file first; answers are grounded in what you upload.'}
+      </Alert>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Field
+        label="Question"
+        error={errors.question}
+        hint="Answered only from your documents, with citations to the passages used."
+        action={<CharCount value={ask.question} max={AI_LIMITS.questionChars} />}
+      >
+        <Textarea
+          rows={3}
+          value={ask.question}
+          onChange={(e) => onQuestion(e.target.value)}
+          placeholder="What does the onboarding guide say about security training?"
+        />
+      </Field>
+      <fieldset>
+        <legend className="mb-1.5 flex w-full items-center justify-between text-13 font-medium text-fg">
+          Documents
+          <span className="font-normal text-fg-muted">
+            {ask.documentIds.length ? `${ask.documentIds.length} selected` : `All ${ready.length} ready`}
+          </span>
+        </legend>
+        <ul className="max-h-48 divide-y divide-border overflow-y-auto rounded-md border border-border">
+          {ready.map((doc) => (
+            <li key={doc.id}>
+              <label className="flex cursor-pointer items-center gap-3 px-3 py-2 text-13 transition-colors hover:bg-surface-2/60">
+                <input
+                  type="checkbox"
+                  checked={ask.documentIds.includes(doc.id)}
+                  onChange={() => toggle(doc.id)}
+                  className="size-4 rounded border-border-strong accent-[rgb(var(--accent))]"
+                />
+                <span className="min-w-0 flex-1 truncate text-fg">{doc.filename}</span>
+                {doc.pageCount != null && (
+                  <span className="shrink-0 text-xs text-fg-muted">{doc.pageCount} pages</span>
+                )}
+              </label>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-1.5 text-13 text-fg-muted">Leave all unticked to search every ready document.</p>
+      </fieldset>
+    </div>
   )
 }
 

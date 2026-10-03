@@ -12,6 +12,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import io.parth.nebulaqueue.dto.ApiError;
 
@@ -33,9 +34,29 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, ex.getMessage());
     }
 
-    @ExceptionHandler(TooManyJobsException.class)
-    public ResponseEntity<ApiError> handleTooManyJobs(TooManyJobsException ex) {
+    @ExceptionHandler(UsageLimitException.class)
+    public ResponseEntity<ApiError> handleUsageLimit(UsageLimitException ex) {
         return error(HttpStatus.TOO_MANY_REQUESTS, ex.getMessage());
+    }
+
+    @ExceptionHandler(DocumentNotFoundException.class)
+    public ResponseEntity<ApiError> handleDocumentNotFound(DocumentNotFoundException ex) {
+        return error(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+
+    @ExceptionHandler(InvalidDocumentException.class)
+    public ResponseEntity<ApiError> handleInvalidDocument(InvalidDocumentException ex) {
+        return error(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
+    @ExceptionHandler(DocumentStateException.class)
+    public ResponseEntity<ApiError> handleDocumentState(DocumentStateException ex) {
+        return error(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<ApiError> handleUploadTooLarge(MaxUploadSizeExceededException ex) {
+        return error(HttpStatus.CONTENT_TOO_LARGE, "File is too large (max 10 MB)");
     }
 
     @ExceptionHandler(AccessDeniedException.class)

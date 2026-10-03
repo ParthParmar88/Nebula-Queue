@@ -12,16 +12,21 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import io.parth.nebulaqueue.config.JobStatusPublisher;
+import io.parth.nebulaqueue.dto.AskJobPayload;
+import io.parth.nebulaqueue.dto.IngestJobPayload;
 import io.parth.nebulaqueue.dto.SubmitJobRequest;
 import io.parth.nebulaqueue.dto.WorkerResultRequest;
 import io.parth.nebulaqueue.exception.InvalidJobRequestException;
 import io.parth.nebulaqueue.exception.InvalidJobStateException;
 import io.parth.nebulaqueue.exception.JobNotFoundException;
-import io.parth.nebulaqueue.exception.TooManyJobsException;
+import io.parth.nebulaqueue.exception.UsageLimitException;
+import io.parth.nebulaqueue.model.Document;
+import io.parth.nebulaqueue.model.DocumentStatus;
 import io.parth.nebulaqueue.model.Job;
 import io.parth.nebulaqueue.model.JobStatus;
 import io.parth.nebulaqueue.model.JobType;
 import io.parth.nebulaqueue.producer.JobProducer;
+import io.parth.nebulaqueue.repository.DocumentRepository;
 import io.parth.nebulaqueue.repository.JobRepository;
 import lombok.RequiredArgsConstructor;
 
@@ -29,13 +34,14 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class JobService {
 
-    private static final List<JobType> AI_TYPES = Arrays.stream(JobType.values()).filter(JobType::isAi).toList();
+    private static final List<JobType> METERED_TYPES = Arrays.stream(JobType.values()).filter(JobType::isMetered).toList();
     private static final List<JobStatus> ACTIVE_STATUSES = List.of(JobStatus.PENDING, JobStatus.PROCESSING);
 
     private final JobRepository jobRepository;
     private final JobProducer jobProducer;
     private final JobStatusPublisher jobStatusPublisher;
     private final JobPayloadValidator payloadValidator;
+    private final DocumentRepository documentRepository;
 
     /** AI jobs cost money per call — cap how many one user can have queued or running at once. */
     @Value("${app.ai.max-active-jobs-per-user:3}")
@@ -43,26 +49,72 @@ public class JobService {
 
     // Submit a job — always a new row, owned by the authenticated user
     public Job submitJob(SubmitJobRequest request) {
+        if (!request.type().isUserSubmittable()) {
+            throw new InvalidJobRequestException(request.type() + " jobs are created automatically and can't be submitted");
+        }
         payloadValidator.validate(request.type(), request.payload());
         String currentUser = getCurrentUsername();
 
-        if (request.type().isAi()) {
-            long active = jobRepository.countBySubmittedByAndTypeInAndStatusIn(currentUser, AI_TYPES, ACTIVE_STATUSES);
+        if (request.type().isMetered()) {
+            long active = jobRepository.countBySubmittedByAndTypeInAndStatusIn(currentUser, METERED_TYPES, ACTIVE_STATUSES);
             if (active >= maxActiveAiJobsPerUser) {
-                throw new TooManyJobsException("You already have " + active
+                throw new UsageLimitException("You already have " + active
                         + " AI jobs queued or running. Wait for one to finish before starting another.");
             }
         }
 
+        String payload = request.type() == JobType.AI_ASK
+                ? resolveAskPayload(currentUser, payloadValidator.parseAsk(request.payload()))
+                : request.payload();
+        return queue(request.type(), payload, currentUser);
+    }
+
+    /** Queue the indexing job for a freshly uploaded document (called by DocumentService). */
+    public Job queueIngest(Document document) {
+        String payload = payloadValidator.toJson(
+                new IngestJobPayload(document.getId(), document.getFilename(), document.getContentType()));
+        return queue(JobType.INGEST_DOCUMENT, payload, document.getOwner());
+    }
+
+    private Job queue(JobType type, String payload, String owner) {
         Job job = new Job();
-        job.setType(request.type());
-        job.setPayload(request.payload());
+        job.setType(type);
+        job.setPayload(payload);
         job.setStatus(JobStatus.PENDING);
-        job.setSubmittedBy(currentUser);
+        job.setSubmittedBy(owner);
 
         Job savedJob = jobRepository.save(job);
         jobProducer.sendJob(savedJob);
         return savedJob;
+    }
+
+    /**
+     * Pin an AI_ASK job to concrete documents the user owns and that are ready to search.
+     * No ids means "all my ready documents". Unknown or foreign ids get the same message,
+     * so the API doesn't reveal which document ids exist.
+     */
+    private String resolveAskPayload(String user, JobPayloadValidator.AskPayload ask) {
+        List<Document> documents;
+        if (ask.documentIds() == null || ask.documentIds().isEmpty()) {
+            documents = documentRepository.findByOwnerAndStatusOrderByCreatedAtDesc(user, DocumentStatus.READY);
+            if (documents.isEmpty()) {
+                throw new InvalidJobRequestException(
+                        "Upload a document and wait for it to finish indexing before asking questions.");
+            }
+        } else {
+            List<String> ids = ask.documentIds().stream().distinct().toList();
+            documents = documentRepository.findAllById(ids);
+            if (documents.size() != ids.size() || documents.stream().anyMatch(d -> !user.equals(d.getOwner()))) {
+                throw new InvalidJobRequestException("Some selected documents don't exist.");
+            }
+            documents.stream().filter(d -> d.getStatus() != DocumentStatus.READY).findFirst().ifPresent(d -> {
+                throw new InvalidJobRequestException("“" + d.getFilename() + "” isn't ready to search yet.");
+            });
+        }
+        List<AskJobPayload.DocumentRef> refs = documents.stream()
+                .map(d -> new AskJobPayload.DocumentRef(d.getId(), d.getFilename()))
+                .toList();
+        return payloadValidator.toJson(new AskJobPayload(ask.question().trim(), refs));
     }
 
     // Update status — workers call this; admins can also call it manually
@@ -88,6 +140,19 @@ public class JobService {
         if (result.inputTokens() != null) job.setInputTokens(result.inputTokens());
         if (result.outputTokens() != null) job.setOutputTokens(result.outputTokens());
         if (result.costUsd() != null) job.setCostUsd(result.costUsd());
+        if (result.sources() != null) job.setSources(result.sources());
+
+        // Safety net: if indexing failed before the worker could report it, don't leave the
+        // document stuck in PROCESSING forever.
+        if (job.getType() == JobType.INGEST_DOCUMENT && result.status() == JobStatus.FAILED) {
+            documentRepository.findByIngestJobId(job.getId())
+                    .filter(d -> d.getStatus() == DocumentStatus.PROCESSING)
+                    .ifPresent(d -> {
+                        d.setStatus(DocumentStatus.FAILED);
+                        d.setError(result.resultUrl());
+                        documentRepository.save(d);
+                    });
+        }
         return saveAndPublish(job);
     }
 

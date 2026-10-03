@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Menu, Plus } from 'lucide-react'
 import { useAuth } from '../../context/authContext.js'
 import { ShellContext } from '../../context/shellContext.js'
+import { useRefreshDocuments } from '../../hooks/useDocuments'
 import { useApplyJobUpdate } from '../../hooks/useJobs'
 import { useHotkey } from '../../hooks/useHotkey'
 import { useJobSocket } from '../../hooks/useJobSocket'
 import { appendDelta, clearStream } from '../../lib/jobStream'
-import { isFinished } from '../../lib/jobTypes'
+import { isFinished, JOB_TYPES } from '../../lib/jobTypes'
 import { useLocation } from '../../lib/router'
 import NewJobDialog from '../jobs/NewJobDialog'
 import Button from '../ui/Button'
@@ -24,23 +25,31 @@ export default function AppShell({ children }) {
   const { token, isAdmin } = useAuth()
   const { path } = useLocation()
   const [navOpen, setNavOpen] = useState(false)
-  const [newJobOpen, setNewJobOpen] = useState(false)
+  // null = closed; otherwise the dialog's preset ({ type?, documentIds? })
+  const [newJob, setNewJob] = useState(null)
   const mainRef = useRef(null)
   const isFirstRoute = useRef(true)
 
   const applyJobUpdate = useApplyJobUpdate()
+  const refreshDocuments = useRefreshDocuments()
   const onJobUpdate = useCallback(
     (job) => {
       applyJobUpdate(job)
-      // The saved output replaces the live text once the job is done
-      if (isFinished(job.status)) clearStream(job.id)
+      if (isFinished(job.status)) {
+        // The saved output replaces the live text once the job is done
+        clearStream(job.id)
+        // An indexing job finishing means a document became ready (or failed)
+        if (job.type === 'INGEST_DOCUMENT') refreshDocuments()
+      }
     },
-    [applyJobUpdate]
+    [applyJobUpdate, refreshDocuments]
   )
   const realtimeConnected = useJobSocket({ token, isAdmin, onJobUpdate, onStreamDelta: appendDelta })
 
-  const openNewJob = useCallback(() => setNewJobOpen(true), [])
-  const closeNewJob = useCallback(() => setNewJobOpen(false), [])
+  // Also used directly as onClick/hotkey handlers, whose events have a `type` too ("click"),
+  // so only accept presets naming a real job type
+  const openNewJob = useCallback((preset) => setNewJob(JOB_TYPES[preset?.type] ? preset : {}), [])
+  const closeNewJob = useCallback(() => setNewJob(null), [])
   const closeNav = useCallback(() => setNavOpen(false), [])
   useHotkey('n', openNewJob)
 
@@ -86,7 +95,7 @@ export default function AppShell({ children }) {
           </Link>
           <div className="ml-auto flex items-center gap-1">
             <ConnectionIndicator compact side="bottom" align="end" />
-            <Button variant="primary" size="icon" onClick={openNewJob} aria-label="New job">
+            <Button variant="primary" size="icon" onClick={() => openNewJob()} aria-label="New job">
               <Plus aria-hidden="true" />
             </Button>
           </div>
@@ -105,7 +114,7 @@ export default function AppShell({ children }) {
           {children}
         </main>
 
-        <NewJobDialog open={newJobOpen} onClose={closeNewJob} />
+        <NewJobDialog open={newJob !== null} preset={newJob} onClose={closeNewJob} />
       </div>
     </ShellContext.Provider>
   )

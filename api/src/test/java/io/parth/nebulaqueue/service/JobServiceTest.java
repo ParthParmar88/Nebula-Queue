@@ -28,11 +28,14 @@ import io.parth.nebulaqueue.dto.WorkerResultRequest;
 import io.parth.nebulaqueue.exception.InvalidJobRequestException;
 import io.parth.nebulaqueue.exception.InvalidJobStateException;
 import io.parth.nebulaqueue.exception.JobNotFoundException;
-import io.parth.nebulaqueue.exception.TooManyJobsException;
+import io.parth.nebulaqueue.exception.UsageLimitException;
+import io.parth.nebulaqueue.model.Document;
+import io.parth.nebulaqueue.model.DocumentStatus;
 import io.parth.nebulaqueue.model.Job;
 import io.parth.nebulaqueue.model.JobStatus;
 import io.parth.nebulaqueue.model.JobType;
 import io.parth.nebulaqueue.producer.JobProducer;
+import io.parth.nebulaqueue.repository.DocumentRepository;
 import io.parth.nebulaqueue.repository.JobRepository;
 
 class JobServiceTest {
@@ -40,6 +43,7 @@ class JobServiceTest {
     private JobRepository jobRepository;
     private JobProducer jobProducer;
     private JobStatusPublisher publisher;
+    private DocumentRepository documentRepository;
     private JobService jobService;
 
     @BeforeEach
@@ -47,8 +51,73 @@ class JobServiceTest {
         jobRepository = mock(JobRepository.class);
         jobProducer = mock(JobProducer.class);
         publisher = mock(JobStatusPublisher.class);
-        jobService = new JobService(jobRepository, jobProducer, publisher, new JobPayloadValidator());
+        documentRepository = mock(DocumentRepository.class);
+        jobService = new JobService(jobRepository, jobProducer, publisher, new JobPayloadValidator(), documentRepository);
         when(jobRepository.save(any(Job.class))).thenAnswer(inv -> inv.getArgument(0));
+    }
+
+    // ── document Q&A ─────────────────────────────────────────────────────────
+
+    @Test
+    void askWithoutSelectionSearchesAllReadyDocumentsOfTheUser() {
+        signIn("alice@example.com", "ROLE_USER");
+        when(documentRepository.findByOwnerAndStatusOrderByCreatedAtDesc("alice@example.com", DocumentStatus.READY))
+                .thenReturn(List.of(document("d1", "alice@example.com", DocumentStatus.READY)));
+
+        Job saved = jobService.submitJob(new SubmitJobRequest(JobType.AI_ASK, "{\"question\": \" What is it? \"}"));
+
+        assertThat(saved.getPayload())
+                .isEqualTo("{\"question\":\"What is it?\",\"documents\":[{\"id\":\"d1\",\"filename\":\"d1.pdf\"}]}");
+        verify(jobProducer).sendJob(saved);
+    }
+
+    @Test
+    void askFailsClearlyWhenTheUserHasNoReadyDocuments() {
+        signIn("alice@example.com", "ROLE_USER");
+        when(documentRepository.findByOwnerAndStatusOrderByCreatedAtDesc("alice@example.com", DocumentStatus.READY))
+                .thenReturn(List.of());
+
+        assertThatThrownBy(() -> jobService.submitJob(new SubmitJobRequest(JobType.AI_ASK, "{\"question\": \"Hi?\"}")))
+                .isInstanceOf(InvalidJobRequestException.class)
+                .hasMessageContaining("Upload a document");
+    }
+
+    @Test
+    void askCannotTargetSomeoneElsesDocument() {
+        signIn("mallory@example.com", "ROLE_USER");
+        when(documentRepository.findAllById(List.of("d1")))
+                .thenReturn(List.of(document("d1", "alice@example.com", DocumentStatus.READY)));
+
+        assertThatThrownBy(() -> jobService.submitJob(
+                new SubmitJobRequest(JobType.AI_ASK, "{\"question\": \"Hi?\", \"documentIds\": [\"d1\"]}")))
+                .isInstanceOf(InvalidJobRequestException.class)
+                .hasMessageContaining("don't exist");
+        verify(jobProducer, never()).sendJob(any());
+    }
+
+    @Test
+    void ingestJobsCannotBeSubmittedByUsers() {
+        signIn("alice@example.com", "ROLE_USER");
+
+        assertThatThrownBy(() -> jobService.submitJob(new SubmitJobRequest(JobType.INGEST_DOCUMENT, "{}")))
+                .isInstanceOf(InvalidJobRequestException.class);
+    }
+
+    @Test
+    void failedIngestMarksTheDocumentFailed() {
+        signIn("worker", "ROLE_ADMIN");
+        Job ingest = job("j1", "alice@example.com", JobStatus.PROCESSING);
+        ingest.setType(JobType.INGEST_DOCUMENT);
+        Document doc = document("d1", "alice@example.com", DocumentStatus.PROCESSING);
+        when(jobRepository.findById("j1")).thenReturn(Optional.of(ingest));
+        when(documentRepository.findByIngestJobId("j1")).thenReturn(Optional.of(doc));
+
+        jobService.finishJob("j1", new WorkerResultRequest(
+                JobStatus.FAILED, "Error: worker crashed", null, null, null, null, null, null));
+
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.FAILED);
+        assertThat(doc.getError()).isEqualTo("Error: worker crashed");
+        verify(documentRepository).save(doc);
     }
 
     // ── AI jobs ──────────────────────────────────────────────────────────────
@@ -69,7 +138,7 @@ class JobServiceTest {
                 .thenReturn(3L);
 
         assertThatThrownBy(() -> jobService.submitJob(new SubmitJobRequest(JobType.AI_GENERATE, "{\"prompt\": \"hi\"}")))
-                .isInstanceOf(TooManyJobsException.class);
+                .isInstanceOf(UsageLimitException.class);
         verify(jobProducer, never()).sendJob(any());
     }
 
@@ -90,7 +159,7 @@ class JobServiceTest {
         when(jobRepository.findById("j1")).thenReturn(Optional.of(job("j1", "alice@example.com", JobStatus.PROCESSING)));
 
         Job done = jobService.finishJob("j1", new WorkerResultRequest(
-                JobStatus.COMPLETED, null, "Hello!", "gpt-test", 12, 3, new BigDecimal("0.000042")));
+                JobStatus.COMPLETED, null, "Hello!", "gpt-test", 12, 3, new BigDecimal("0.000042"), null));
 
         assertThat(done.getStatus()).isEqualTo(JobStatus.COMPLETED);
         assertThat(done.getOutput()).isEqualTo("Hello!");
@@ -107,7 +176,7 @@ class JobServiceTest {
         signIn("worker", "ROLE_ADMIN");
 
         assertThatThrownBy(() -> jobService.finishJob("j1",
-                new WorkerResultRequest(JobStatus.PROCESSING, null, null, null, null, null, null)))
+                new WorkerResultRequest(JobStatus.PROCESSING, null, null, null, null, null, null, null)))
                 .isInstanceOf(InvalidJobRequestException.class);
     }
 
@@ -184,6 +253,15 @@ class JobServiceTest {
         job.setStatus(status);
         job.setSubmittedBy(owner);
         return job;
+    }
+
+    private static Document document(String id, String owner, DocumentStatus status) {
+        Document doc = new Document();
+        doc.setId(id);
+        doc.setOwner(owner);
+        doc.setFilename(id + ".pdf");
+        doc.setStatus(status);
+        return doc;
     }
 
     private static void signIn(String name, String role) {

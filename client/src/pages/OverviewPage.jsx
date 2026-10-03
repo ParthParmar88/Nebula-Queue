@@ -15,7 +15,7 @@ import { useJobsQuery } from '../hooks/useJobs'
 import { useNow } from '../hooks/useNow'
 import { cn } from '../lib/cn'
 import { formatCompact, formatCost, formatNumber, formatRelative, shortId } from '../lib/format'
-import { isAiJob, JOB_TYPE_ORDER, jobTypeMeta } from '../lib/jobTypes'
+import { ALL_JOB_TYPES, isAiJob, jobTypeMeta } from '../lib/jobTypes'
 
 const RECENT_COUNT = 6
 
@@ -194,10 +194,11 @@ function AiUsage({ jobs }) {
 
 function JobTypeBreakdown({ jobs }) {
   const total = jobs.length
-  const rows = JOB_TYPE_ORDER.map((type) => ({
+  // Only types that have been used — seven rows of zeros would be noise
+  const rows = ALL_JOB_TYPES.map((type) => ({
     type,
     count: jobs.filter((j) => j.type === type).length,
-  }))
+  })).filter((row) => row.count > 0)
 
   return (
     <Card>

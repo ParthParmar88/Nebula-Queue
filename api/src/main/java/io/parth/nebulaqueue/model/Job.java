@@ -43,6 +43,10 @@ public class Job {
     @Column(precision = 12, scale = 6)
     private BigDecimal costUsd;  // null when pricing isn't configured on the worker
 
+    // AI_ASK: JSON array of the passages the answer cites, [{n, documentId, filename, page, text, score}]
+    @Column(columnDefinition = "TEXT")
+    private String sources;
+
     // Instant (UTC) so the JSON always carries a timezone ("...Z") and the browser
     // shows the right local time regardless of the server's timezone.
     private Instant createdAt;
