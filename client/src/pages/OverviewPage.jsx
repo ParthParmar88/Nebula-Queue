@@ -14,8 +14,8 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useJobsQuery } from '../hooks/useJobs'
 import { useNow } from '../hooks/useNow'
 import { cn } from '../lib/cn'
-import { formatRelative, shortId } from '../lib/format'
-import { JOB_TYPE_ORDER, jobTypeMeta } from '../lib/jobTypes'
+import { formatCompact, formatCost, formatNumber, formatRelative, shortId } from '../lib/format'
+import { isAiJob, JOB_TYPE_ORDER, jobTypeMeta } from '../lib/jobTypes'
 
 const RECENT_COUNT = 6
 
@@ -58,9 +58,12 @@ export default function OverviewPage() {
       ) : (
         <div className="flex flex-col gap-6">
           <StatTiles jobs={jobs} />
-          <div className="grid gap-6 lg:grid-cols-3">
+          <div className="grid items-start gap-6 lg:grid-cols-3">
             <RecentJobs jobs={jobs} className="lg:col-span-2" />
-            <JobTypeBreakdown jobs={jobs} />
+            <div className="flex flex-col gap-6">
+              <AiUsage jobs={jobs} />
+              <JobTypeBreakdown jobs={jobs} />
+            </div>
           </div>
         </div>
       )}
@@ -153,6 +156,38 @@ function RecentJobs({ jobs, className }) {
           </li>
         ))}
       </ul>
+    </Card>
+  )
+}
+
+/** Totals across AI jobs: what the model work has cost so far. Hidden until there is any. */
+function AiUsage({ jobs }) {
+  const aiJobs = jobs.filter(isAiJob)
+  if (aiJobs.length === 0) return null
+
+  const sum = (pick) => aiJobs.reduce((total, job) => total + (Number(pick(job)) || 0), 0)
+  const inputTokens = sum((j) => j.inputTokens)
+  const outputTokens = sum((j) => j.outputTokens)
+  const priced = aiJobs.filter((j) => j.costUsd != null)
+  const spend = priced.length ? sum((j) => j.costUsd) : null
+
+  const stats = [
+    { label: 'AI jobs', value: formatNumber(aiJobs.length) },
+    { label: 'Tokens', value: formatCompact(inputTokens + outputTokens), title: `${formatNumber(inputTokens)} in · ${formatNumber(outputTokens)} out` },
+    { label: 'Spend', value: formatCost(spend) },
+  ]
+
+  return (
+    <Card>
+      <CardHeader title="AI usage" description="Tokens and spend across your AI jobs" />
+      <dl className="grid grid-cols-3 divide-x divide-border">
+        {stats.map((stat) => (
+          <div key={stat.label} className="px-4 py-4 text-center" title={stat.title}>
+            <dt className="text-xs text-fg-muted">{stat.label}</dt>
+            <dd className="mt-1 text-lg font-semibold tabular-nums tracking-tight text-fg">{stat.value}</dd>
+          </div>
+        ))}
+      </dl>
     </Card>
   )
 }

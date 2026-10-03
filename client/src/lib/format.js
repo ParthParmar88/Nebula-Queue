@@ -43,6 +43,28 @@ export function formatDuration(ms) {
   return seconds ? `${minutes} min ${seconds} s` : `${minutes} min`
 }
 
+const integerFormat = new Intl.NumberFormat()
+const compactFormat = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
+
+/** 12,345 */
+export function formatNumber(n) {
+  return n == null ? '—' : integerFormat.format(n)
+}
+
+/** 12.3K — for headline totals */
+export function formatCompact(n) {
+  return n == null ? '—' : compactFormat.format(n)
+}
+
+/** "$0.0042", "$1.27" — small LLM costs need more precision than cents. */
+export function formatCost(usd) {
+  if (usd == null) return '—'
+  const value = Number(usd)
+  if (value === 0) return '$0.00'
+  if (value < 0.0001) return '<$0.0001'
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`
+}
+
 export function shortId(id) {
   return id ? id.slice(0, 8) : ''
 }

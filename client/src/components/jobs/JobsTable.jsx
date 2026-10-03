@@ -1,7 +1,7 @@
 import { ChevronRight } from 'lucide-react'
 import { useNow } from '../../hooks/useNow'
 import { formatDateTime, formatRelative, shortId } from '../../lib/format'
-import { jobTypeMeta } from '../../lib/jobTypes'
+import { jobTypeMeta, resultSummary } from '../../lib/jobTypes'
 import { navigate } from '../../lib/router'
 import Button from '../ui/Button'
 import Link from '../ui/Link'
@@ -60,8 +60,8 @@ export default function JobsTable({ jobs, showOwner = false, onCancel, id }) {
                     <StatusBadge status={job.status} />
                   </td>
                   <td className="max-w-64 px-4 py-3">
-                    <span className="block truncate text-fg-muted" title={job.resultUrl || undefined}>
-                      {job.resultUrl || <span className="text-fg-subtle">—</span>}
+                    <span className="block truncate text-fg-muted" title={resultSummary(job).slice(0, 300) || undefined}>
+                      {resultSummary(job) || <span className="text-fg-subtle">—</span>}
                     </span>
                   </td>
                   {showOwner && (
@@ -124,7 +124,7 @@ export default function JobsTable({ jobs, showOwner = false, onCancel, id }) {
                       </>
                     )}
                   </div>
-                  {job.resultUrl && <p className="mt-1.5 truncate text-xs text-fg-muted">{job.resultUrl}</p>}
+                  {resultSummary(job) && <p className="mt-1.5 truncate text-xs text-fg-muted">{resultSummary(job)}</p>}
                 </div>
               </Link>
             </li>

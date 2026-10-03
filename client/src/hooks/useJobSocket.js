@@ -3,18 +3,21 @@ import { Client } from '@stomp/stompjs'
 import SockJS from 'sockjs-client'
 
 // Admins get every job's updates; everyone else only their own jobs.
-const USER_DESTINATION = '/user/queue/jobs'
-const ADMIN_DESTINATION = '/topic/admin/jobs'
+const DESTINATIONS = {
+  user: { jobs: '/user/queue/jobs', stream: '/user/queue/job-stream' },
+  admin: { jobs: '/topic/admin/jobs', stream: '/topic/admin/job-stream' },
+}
 
 /**
- * Subscribes to live job updates. Each message is the full job object.
- * Returns whether the socket is currently connected.
+ * Subscribes to live job updates (each message is the full job) and to the text stream of
+ * AI jobs (`{ jobId, seq, delta }`). Returns whether the socket is currently connected.
  */
-export function useJobSocket({ token, isAdmin, onJobUpdate }) {
+export function useJobSocket({ token, isAdmin, onJobUpdate, onStreamDelta }) {
   const [connected, setConnected] = useState(false)
 
   useEffect(() => {
     if (!token) return
+    const destinations = isAdmin ? DESTINATIONS.admin : DESTINATIONS.user
 
     const client = new Client({
       webSocketFactory: () => new SockJS('/ws'),
@@ -22,9 +25,8 @@ export function useJobSocket({ token, isAdmin, onJobUpdate }) {
       connectHeaders: { Authorization: `Bearer ${token}` },
       onConnect: () => {
         setConnected(true)
-        client.subscribe(isAdmin ? ADMIN_DESTINATION : USER_DESTINATION, (message) => {
-          onJobUpdate(JSON.parse(message.body))
-        })
+        client.subscribe(destinations.jobs, (message) => onJobUpdate(JSON.parse(message.body)))
+        client.subscribe(destinations.stream, (message) => onStreamDelta(JSON.parse(message.body)))
       },
       onWebSocketClose: () => setConnected(false),
       onStompError: (frame) => console.error('🔌 WebSocket error:', frame.headers.message),
@@ -36,7 +38,7 @@ export function useJobSocket({ token, isAdmin, onJobUpdate }) {
       setConnected(false)
       client.deactivate()  // cleanup on logout/unmount
     }
-  }, [token, isAdmin, onJobUpdate])
+  }, [token, isAdmin, onJobUpdate, onStreamDelta])
 
   return connected
 }

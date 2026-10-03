@@ -1,0 +1,45 @@
+"""Settings, read once from the environment."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from urllib.parse import quote
+
+
+def _optional_float(name: str) -> float | None:
+    value = os.environ.get(name, "").strip()
+    return float(value) if value else None
+
+
+@dataclass(frozen=True)
+class Settings:
+    api_url: str
+    worker_token: str
+    rabbitmq_url: str
+    openai_api_key: str
+    model: str
+    # USD per 1M tokens. Optional: without them tokens are still recorded, cost is left empty.
+    price_input_per_1m: float | None
+    price_output_per_1m: float | None
+    default_max_output_tokens: int
+    # How many jobs this worker runs at once (RabbitMQ prefetch)
+    concurrency: int
+
+    @classmethod
+    def from_env(cls) -> Settings:
+        user = quote(os.environ.get("RABBITMQ_USER", "admin"), safe="")
+        password = quote(os.environ.get("RABBITMQ_PASS", "admin123"), safe="")
+        host = os.environ.get("RABBITMQ_HOST", "localhost")
+        port = os.environ.get("RABBITMQ_PORT", "5672")
+        return cls(
+            api_url=os.environ.get("API_URL", "http://localhost:9090").rstrip("/"),
+            worker_token=os.environ.get("WORKER_INTERNAL_TOKEN", ""),
+            rabbitmq_url=f"amqp://{user}:{password}@{host}:{port}/",
+            openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            price_input_per_1m=_optional_float("OPENAI_PRICE_INPUT_PER_1M"),
+            price_output_per_1m=_optional_float("OPENAI_PRICE_OUTPUT_PER_1M"),
+            default_max_output_tokens=int(os.environ.get("AI_DEFAULT_MAX_OUTPUT_TOKENS", "800")),
+            concurrency=int(os.environ.get("AI_WORKER_CONCURRENCY", "4")),
+        )

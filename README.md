@@ -1,12 +1,15 @@
 # Nebula Queue
 
-Nebula Queue is a queue-based full-stack application for submitting jobs, processing them asynchronously, and streaming live status updates back to the UI.
+Nebula Queue is a job platform for AI workloads: submit LLM and background jobs, process them asynchronously on dedicated workers, and watch status — and generated text — stream live into the UI.
+
+LLM calls are slow, expensive and rate-limited, which is exactly what a durable queue is for: requests are persisted, run by a pool of workers at a controlled concurrency, retried on transient errors, and tracked per job with token usage and cost.
 
 ## Tech Stack
 
-- **API:** Java 21, Spring Boot, Spring Security (JWT), Spring Data JPA, RabbitMQ, WebSocket/STOMP
+- **API:** Java 21, Spring Boot, Spring Security (JWT), Spring Data JPA, Spring AMQP, WebSocket/STOMP
+- **AI worker:** Python 3.12, asyncio, aio-pika, OpenAI SDK (behind a provider interface), httpx
+- **Worker:** Node.js, amqplib, axios, nodemailer (email and non-AI jobs)
 - **Client:** React (Vite), TanStack Query, Axios, SockJS + STOMP, Tailwind — see [client/README.md](client/README.md) for structure and design system
-- **Worker:** Node.js, amqplib, axios, nodemailer
 - **Infra:** Docker Compose, PostgreSQL, RabbitMQ, MongoDB (currently not used by core flow)
 
 ## Repository Structure
@@ -14,21 +17,31 @@ Nebula Queue is a queue-based full-stack application for submitting jobs, proces
 ```text
 .
 ├── api/        # Spring Boot API (auth, jobs, queue publishing, websocket updates)
-├── client/     # React UI (job submit/listen for status)
-├── workers/    # Queue consumers/job processors
+├── ai-worker/  # Python worker for AI jobs (LLM streaming, usage + cost tracking)
+├── workers/    # Node worker for email and other non-AI jobs
+├── client/     # React UI
 └── docker-compose.yml
 ```
 
-## Architecture (Run-time Flow)
+## Architecture
 
-1. User submits a job from the client.
-2. API stores the job in PostgreSQL.
-3. API publishes the job to RabbitMQ (`job-queue`).
-4. Worker consumes the job and processes it by type.
-5. Worker reports status to the API (`PATCH /internal/worker/jobs/{id}/status` with `X-Worker-Token`).
-6. API pushes the updated job over WebSocket to its owner (`/user/queue/jobs`) and to admins (`/topic/admin/jobs`).
+```text
+            REST + JWT                      job-exchange
+ Browser ──────────────▶ API ──┬── job.routing.key ─▶ job-queue    ─▶ Node worker
+    ▲                     │    └── job.ai          ─▶ ai-job-queue ─▶ Python AI worker
+    │  WebSocket (STOMP)  │                                              │    │
+    └─────────────────────┤◀── status updates (HTTP, X-Worker-Token) ────┘    │
+                          │◀── job-events / job.stream (token chunks) ────────┘
+                     PostgreSQL
+```
 
-If a job is cancelled while still in the queue, the API rejects the worker's `PROCESSING` update with `409` and the worker skips the job.
+1. The user submits a job. The API validates it, stores it in PostgreSQL and publishes it to RabbitMQ — AI jobs to `ai-job-queue`, everything else to `job-queue`.
+2. A worker claims the job (`PATCH /internal/worker/jobs/{id}/status?status=PROCESSING`). If the job was cancelled while queued, the API answers `409` and the worker skips it.
+3. **AI jobs** stream from the model. The worker batches tokens (~100 ms) and publishes them to the `job-events` exchange; the API relays them over WebSocket to the job's owner (`/user/queue/job-stream`) and admins.
+4. The worker reports the final state — for AI jobs with the full output, model, token counts and cost (`POST /internal/worker/jobs/{id}/finish`).
+5. The API pushes every state change over WebSocket to the owner (`/user/queue/jobs`) and admins (`/topic/admin/jobs`).
+
+**Design choice:** durable state changes go through the API's validated HTTP endpoints (the API enforces the status machine and ownership), while the high-frequency, disposable token stream travels over the message bus. Workers never talk to browsers directly.
 
 ## Services and Ports
 
@@ -49,6 +62,15 @@ Default RabbitMQ credentials in current compose file:
 ### Prerequisites
 
 - Docker + Docker Compose
+
+### Configure AI (OpenAI)
+
+```bash
+cp .env.example .env
+# Edit .env: set OPENAI_API_KEY (and optionally OPENAI_MODEL and the per-1M-token prices)
+```
+
+Without a key everything else works; AI jobs fail with a clear "OPENAI_API_KEY is not set" message.
 
 ### Run the full stack
 
@@ -118,6 +140,16 @@ WORKER_INTERNAL_TOKEN=dev-worker-token API_URL=http://localhost:9090 \
   DB_HOST=localhost RABBITMQ_HOST=localhost node index.js
 ```
 
+### 5) Run AI worker
+
+```bash
+cd ai-worker
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+OPENAI_API_KEY=sk-... WORKER_INTERNAL_TOKEN=dev-worker-token API_URL=http://localhost:9090 \
+  RABBITMQ_HOST=localhost python -m ai_worker.main
+```
+
 ## Build, Test, and Lint
 
 ### API
@@ -136,9 +168,19 @@ npm run build
 npm run lint
 ```
 
-### Worker
+### AI worker
 
-Worker currently has no implemented automated test script.
+Tests use a fake LLM provider and fake API — no OpenAI key or RabbitMQ needed:
+
+```bash
+cd ai-worker
+pip install -r requirements-dev.txt
+pytest
+```
+
+### Node worker
+
+No automated tests yet.
 
 ## API and Realtime Endpoints
 
@@ -149,24 +191,25 @@ Worker currently has no implemented automated test script.
 
 ### Jobs
 
-- `POST /api/jobs` (authenticated; body `{"type": "...", "payload": "..."}` — `type` is one of `BATCH`, `IMAGE_RESIZE`, `PDF_GENERATE`, `EMAIL_SEND`; `payload` is an optional JSON string)
+- `POST /api/jobs` (authenticated; body `{"type": "...", "payload": "..."}` — `type` is one of `AI_GENERATE`, `EMAIL_SEND`, `IMAGE_RESIZE`, `PDF_GENERATE`, `BATCH`; `payload` is a JSON string). For `AI_GENERATE` the payload is `{"prompt": "...", "system": "...", "maxOutputTokens": 800}` (`system` and `maxOutputTokens` optional; prompt ≤ 8,000 chars). Each user can have at most `app.ai.max-active-jobs-per-user` (default 3) AI jobs queued or running.
 - `GET /api/jobs` (admin; newest first)
 - `GET /api/jobs/my` (authenticated; newest first)
 - `GET /api/jobs/{id}` (authenticated)
 - `PATCH /api/jobs/{id}/status` (admin JWT; query params `status`, optional `resultUrl`)
-- `PATCH /internal/worker/jobs/{id}/status` (background worker; header `X-Worker-Token` must match `app.worker.internal-token`; same query params as above)
+- `PATCH /internal/worker/jobs/{id}/status` (workers; header `X-Worker-Token` must match `app.worker.internal-token`; same query params as above)
+- `POST /internal/worker/jobs/{id}/finish` (workers; JSON `{status: COMPLETED|FAILED, output, resultUrl, model, inputTokens, outputTokens, costUsd}`)
 - `POST /api/jobs/{id}/cancel` (authenticated; only while `PENDING`)
 
 Statuses: `PENDING → PROCESSING → COMPLETED | FAILED`, or `PENDING → CANCELLED`.
 
-Errors return JSON `{"status", "error", "message", "timestamp"}`: `400` invalid input, `401` missing/expired token or wrong password, `403` not your job / not admin, `404` job not found, `409` invalid status change (e.g. cancelling a job that already started).
+Errors return JSON `{"status", "error", "message", "timestamp"}`: `400` invalid input, `401` missing/expired token or wrong password, `403` not your job / not admin, `404` job not found, `409` invalid status change (e.g. cancelling a job that already started), `429` too many AI jobs running.
 
 ### WebSocket (STOMP over SockJS)
 
 - handshake endpoint: `/ws`
 - the STOMP `CONNECT` frame must include the header `Authorization: Bearer <jwt>`
-- subscribe to `/user/queue/jobs` for your own jobs, or `/topic/admin/jobs` (admins only) for all jobs
-- each message is the full job object (including `status`, `resultUrl`, timestamps)
+- subscribe to `/user/queue/jobs` for your own jobs, or `/topic/admin/jobs` (admins only) for all jobs — each message is the full job object (status, result/output, usage, timestamps)
+- subscribe to `/user/queue/job-stream` (or `/topic/admin/job-stream` for admins) for live AI output — each message is `{jobId, seq, delta}`; `seq` increases by one per chunk
 - clients cannot send messages; subscriptions to any other destination are rejected
 
 ## Configuration
@@ -180,8 +223,9 @@ Key files:
 
 Common runtime env vars used in compose:
 
-- API: `SPRING_DATASOURCE_*`, `SPRING_RABBITMQ_*`, `APP_WORKER_INTERNAL_TOKEN` (shared with worker), optional `APP_BOOTSTRAP_ADMIN_EMAIL` / `APP_BOOTSTRAP_ADMIN_PASSWORD` (creates an admin user once if that email does not exist)
-- Worker: `API_URL`, `WORKER_INTERNAL_TOKEN` (must match API), `DB_*`, `RABBITMQ_*`, optional `EMAIL_USER` / `EMAIL_PASS` for `EMAIL_SEND` jobs
+- API: `SPRING_DATASOURCE_*`, `SPRING_RABBITMQ_*`, `APP_WORKER_INTERNAL_TOKEN` (shared with workers), `APP_AI_MAX_ACTIVE_JOBS_PER_USER` (default 3), optional `APP_BOOTSTRAP_ADMIN_EMAIL` / `APP_BOOTSTRAP_ADMIN_PASSWORD` (creates an admin user once if that email does not exist)
+- AI worker: `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-4o-mini`), optional `OPENAI_PRICE_INPUT_PER_1M` / `OPENAI_PRICE_OUTPUT_PER_1M` (USD; without them tokens are recorded but cost is left empty), `AI_WORKER_CONCURRENCY` (default 4), `AI_DEFAULT_MAX_OUTPUT_TOKENS` (default 800), plus `API_URL`, `WORKER_INTERNAL_TOKEN`, `RABBITMQ_*`
+- Node worker: `API_URL`, `WORKER_INTERNAL_TOKEN` (must match API), `DB_*`, `RABBITMQ_*`, optional `EMAIL_USER` / `EMAIL_PASS` for `EMAIL_SEND` jobs
 - Client (Docker): `API_PROXY_TARGET` (Vite dev proxy target for `/api`, `/auth`, `/ws`)
 
 ### Default accounts (Docker Compose)
@@ -224,21 +268,25 @@ Example payload in the UI:
 {"to":"recipient@example.com","subject":"Test","body":"Hello from Nebula Queue"}
 ```
 
-## MVP behavior
+## Features
 
-- Register and log in from the web UI; JWT is stored in the browser and sent on API calls.
-- Submit jobs (optional JSON payload; required for `EMAIL_SEND` with `to`, `subject`, `body`).
-- Cancel jobs while they are `PENDING`.
-- Worker updates status via the internal PATCH route and `X-Worker-Token`; the API broadcasts over WebSocket to `/topic/jobs`.
+- **AI text generation** — prompt an LLM; the response streams into the job page as it's written, and the final output, model, token counts and cost are stored with the job.
+- **Usage tracking** — per-job tokens and cost, and totals on the Overview.
+- **Cost control** — per-user cap on concurrent AI jobs, prompt/output limits validated before queueing, worker concurrency set by RabbitMQ prefetch.
+- **Resilience** — the OpenAI SDK retries rate limits and 5xx with backoff; failures are recorded with an actionable message (bad key, quota, unknown model, timeout).
+- **Email jobs** via the Node worker; cancel jobs while `PENDING`.
+- **Accounts** — register (signs you in), JWT auth; members see their own jobs, admins see all.
 
 ## Troubleshooting
 
-- **Submit job appears to do nothing:** use the UI at [http://localhost:5173](http://localhost:5173) (Vite dev server with API proxy), not a static `client/dist` folder or `npm run preview` without rebuilding after config changes. Sign in first (register does not log you in automatically). Check the browser Network tab for `POST /api/jobs` — it should return `200`. After a successful submit, `docker logs nq-api` should show `Job submitted: id=...` and `📨 Job pushed to queue`.
+- **Submit job appears to do nothing:** use the UI at [http://localhost:5173](http://localhost:5173) (Vite dev server with API proxy), not a static `client/dist` folder or `npm run preview` without rebuilding after config changes. Sign in first. Check the browser Network tab for `POST /api/jobs` — it should return `200`. After a successful submit, `docker logs nq-api` should show `Job submitted: id=...` and `📨 Job pushed to queue`.
 - **Port already in use:** stop existing processes/containers on ports `5173`, `9090`, `5432`, `5672`, `15672`.
 - **API cannot connect to DB/Rabbit:** verify infra is running and hostnames match runtime mode (`localhost` for local, service names in Docker network).
 - **No realtime updates in UI:** check API WebSocket endpoint `/ws`, Vite proxy config, and RabbitMQ/worker logs.
 - **Worker not consuming jobs:** verify `job-queue` exists and worker can connect to RabbitMQ.
 - **Worker cannot update status (401/503):** ensure `WORKER_INTERNAL_TOKEN` matches `APP_WORKER_INTERNAL_TOKEN` / `app.worker.internal-token`, and the worker calls `PATCH /internal/worker/jobs/{id}/status` with query params (not a JSON body).
+- **AI jobs fail or stay Pending:** the job page shows the reason (missing/invalid `OPENAI_API_KEY`, quota exceeded, model not available). If they stay `PENDING`, check `docker logs nq-ai-worker` and that `ai-job-queue` has a consumer in the RabbitMQ UI.
+- **AI output appears only at the end, not live:** the stream travels API ← `job-stream-events` queue; check `docker logs nq-api` for listener errors.
 - **EMAIL_SEND jobs fail:** set `EMAIL_USER` and `EMAIL_PASS` in `.env` (see [EMAIL_SEND](#email_send-gmail)); use a Gmail **app password**, not your normal login password. Check `docker logs nq-worker` for `Job failed (...):`.
 - **Integration tests:** `./gradlew test` runs the unit tests and skips the full Spring context test unless you set `RUN_INTEGRATION_TESTS=true` (requires Postgres and RabbitMQ).
 - **"Connecting…" never turns into "Live updates":** the WebSocket login failed — usually an expired token. Log out and back in; check the browser console for `WebSocket error`.

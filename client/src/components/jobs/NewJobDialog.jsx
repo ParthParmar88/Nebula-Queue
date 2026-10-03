@@ -3,8 +3,8 @@ import { getErrorMessage } from '../../api/errors'
 import { useToast } from '../../context/toastContext.js'
 import { useSubmitJob } from '../../hooks/useJobs'
 import { cn } from '../../lib/cn'
-import { shortId } from '../../lib/format'
-import { JOB_TYPE_ORDER, JOB_TYPES } from '../../lib/jobTypes'
+import { formatNumber, shortId } from '../../lib/format'
+import { AI_LIMITS, JOB_TYPE_ORDER, JOB_TYPES } from '../../lib/jobTypes'
 import { navigate } from '../../lib/router'
 import Alert from '../ui/Alert'
 import Badge from '../ui/Badge'
@@ -24,17 +24,21 @@ function NewJobForm({ onClose }) {
   const { toast } = useToast()
   const submit = useSubmitJob()
 
-  const [type, setType] = useState('EMAIL_SEND')
+  const [type, setType] = useState('AI_GENERATE')
+  const [ai, setAi] = useState({ prompt: '', system: '' })
   const [email, setEmail] = useState({ to: '', subject: '', body: '' })
   const [payload, setPayload] = useState('')
   const [errors, setErrors] = useState({})
 
   const meta = JOB_TYPES[type]
-  const isEmail = type === 'EMAIL_SEND'
 
   function validate() {
     const next = {}
-    if (isEmail) {
+    if (type === 'AI_GENERATE') {
+      if (!ai.prompt.trim()) next.prompt = 'Write a prompt.'
+      else if (ai.prompt.length > AI_LIMITS.promptChars) next.prompt = `Keep the prompt under ${formatNumber(AI_LIMITS.promptChars)} characters.`
+      if (ai.system.length > AI_LIMITS.systemChars) next.system = `Keep instructions under ${formatNumber(AI_LIMITS.systemChars)} characters.`
+    } else if (type === 'EMAIL_SEND') {
       if (!EMAIL_PATTERN.test(email.to.trim())) next.to = 'Enter a valid email address.'
       if (!email.subject.trim()) next.subject = 'Add a subject.'
       if (!email.body.trim()) next.body = 'Write a message.'
@@ -50,7 +54,10 @@ function NewJobForm({ onClose }) {
   }
 
   function buildPayload() {
-    if (isEmail) {
+    if (type === 'AI_GENERATE') {
+      return JSON.stringify({ prompt: ai.prompt, ...(ai.system.trim() ? { system: ai.system.trim() } : {}) })
+    }
+    if (type === 'EMAIL_SEND') {
       return JSON.stringify({ to: email.to.trim(), subject: email.subject.trim(), body: email.body })
     }
     return payload.trim() || null
@@ -70,11 +77,17 @@ function NewJobForm({ onClose }) {
       {
         onSuccess: (job) => {
           onClose()
-          toast({
-            title: 'Job submitted',
-            description: `${meta.label} · ${shortId(job.id)} is in the queue.`,
-            action: { label: 'View job', onClick: () => navigate(`/jobs/${job.id}`) },
-          })
+          if (meta.ai) {
+            // The interesting part of an AI job is watching it write — go straight there
+            navigate(`/jobs/${job.id}`)
+            toast({ title: 'Generating…', description: 'The response streams in as the model writes it.' })
+          } else {
+            toast({
+              title: 'Job submitted',
+              description: `${meta.label} · ${shortId(job.id)} is in the queue.`,
+              action: { label: 'View job', onClick: () => navigate(`/jobs/${job.id}`) },
+            })
+          }
         },
       }
     )
@@ -89,8 +102,8 @@ function NewJobForm({ onClose }) {
     }
   }
 
-  function updateEmail(field, value) {
-    setEmail((e) => ({ ...e, [field]: value }))
+  function updateField(setter, field, value) {
+    setter((current) => ({ ...current, [field]: value }))
     if (errors[field]) setErrors((e) => ({ ...e, [field]: undefined }))
   }
 
@@ -105,7 +118,7 @@ function NewJobForm({ onClose }) {
         <>
           <Button onClick={onClose}>Cancel</Button>
           <Button type="submit" form={formId} variant="primary" loading={submit.isPending}>
-            Submit job
+            {meta.ai ? 'Generate' : 'Submit job'}
           </Button>
         </>
       }
@@ -138,6 +151,7 @@ function NewJobForm({ onClose }) {
                   className={cn(
                     'relative flex cursor-pointer gap-3 rounded-lg border p-3 transition-[border-color,box-shadow,background-color]',
                     'has-[:focus-visible]:ring-[3px] has-[:focus-visible]:ring-accent/25',
+                    t.ai && 'sm:col-span-2',
                     selected
                       ? 'border-accent bg-accent-soft/40 ring-1 ring-accent'
                       : 'border-border hover:border-border-strong hover:bg-surface-2/60'
@@ -166,6 +180,7 @@ function NewJobForm({ onClose }) {
                   <span className="min-w-0">
                     <span className="flex flex-wrap items-center gap-1.5 text-13 font-medium text-fg">
                       {t.label}
+                      {t.ai && <Badge tone="accent" className="px-1 py-0 text-2xs">AI</Badge>}
                       {!t.implemented && <Badge className="px-1 py-0 text-2xs">Simulated</Badge>}
                     </span>
                     <span className="mt-0.5 block text-xs leading-relaxed text-fg-muted">{t.description}</span>
@@ -176,7 +191,38 @@ function NewJobForm({ onClose }) {
           </div>
         </fieldset>
 
-        {isEmail ? (
+        {type === 'AI_GENERATE' && (
+          <div className="flex flex-col gap-4">
+            <Field
+              label="Prompt"
+              error={errors.prompt}
+              hint="Runs on the AI worker with the model set in OPENAI_MODEL."
+              action={<CharCount value={ai.prompt} max={AI_LIMITS.promptChars} />}
+            >
+              <Textarea
+                rows={6}
+                value={ai.prompt}
+                onChange={(e) => updateField(setAi, 'prompt', e.target.value)}
+                placeholder="Write a three-sentence product description for a noise-cancelling headphone aimed at commuters."
+              />
+            </Field>
+            <Field
+              label="System instructions"
+              optional
+              error={errors.system}
+              hint="Sets tone, format or role — for example “Answer in bullet points”."
+            >
+              <Textarea
+                rows={2}
+                value={ai.system}
+                onChange={(e) => updateField(setAi, 'system', e.target.value)}
+                className="min-h-0"
+              />
+            </Field>
+          </div>
+        )}
+
+        {type === 'EMAIL_SEND' && (
           <div className="flex flex-col gap-4">
             <Field label="To" error={errors.to}>
               <Input
@@ -184,21 +230,23 @@ function NewJobForm({ onClose }) {
                 autoComplete="email"
                 placeholder="recipient@example.com"
                 value={email.to}
-                onChange={(e) => updateEmail('to', e.target.value)}
+                onChange={(e) => updateField(setEmail, 'to', e.target.value)}
               />
             </Field>
             <Field label="Subject" error={errors.subject}>
-              <Input value={email.subject} onChange={(e) => updateEmail('subject', e.target.value)} maxLength={200} />
+              <Input value={email.subject} onChange={(e) => updateField(setEmail, 'subject', e.target.value)} maxLength={200} />
             </Field>
             <Field
               label="Message"
               error={errors.body}
               hint="Sent as plain text. The worker needs EMAIL_USER and EMAIL_PASS (a Gmail app password) configured."
             >
-              <Textarea rows={5} value={email.body} onChange={(e) => updateEmail('body', e.target.value)} />
+              <Textarea rows={5} value={email.body} onChange={(e) => updateField(setEmail, 'body', e.target.value)} />
             </Field>
           </div>
-        ) : (
+        )}
+
+        {!meta.implemented && (
           <div className="flex flex-col gap-4">
             <Alert tone="info">
               The worker doesn’t implement <span className="font-medium text-fg">{meta.label}</span> yet — it
@@ -233,5 +281,14 @@ function NewJobForm({ onClose }) {
         )}
       </form>
     </Dialog>
+  )
+}
+
+function CharCount({ value, max }) {
+  const over = value.length > max
+  return (
+    <span className={cn('text-xs tabular-nums', over ? 'font-medium text-danger' : 'text-fg-subtle')}>
+      {formatNumber(value.length)} / {formatNumber(max)}
+    </span>
   )
 }

@@ -17,11 +17,9 @@ public class JobProducer {
     private final AmqpTemplate amqpTemplate;
 
     public void sendJob(Job job) {
-        amqpTemplate.convertAndSend(
-            RabbitMQConfig.EXCHANGE_NAME,
-            RabbitMQConfig.ROUTING_KEY,
-            JobMessage.from(job)
-        );
-        log.info("📨 Job pushed to queue: {}", job.getId());
+        // AI jobs go to the Python AI worker; everything else to the Node worker
+        String routingKey = job.getType().isAi() ? RabbitMQConfig.AI_ROUTING_KEY : RabbitMQConfig.ROUTING_KEY;
+        amqpTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, routingKey, JobMessage.from(job));
+        log.info("📨 Job pushed to queue: {} ({})", job.getId(), routingKey);
     }
 }

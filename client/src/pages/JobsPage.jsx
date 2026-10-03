@@ -26,7 +26,7 @@ const TABLE_ID = 'jobs-results'
 
 function matchesSearch(job, query) {
   if (!query) return true
-  const haystack = [job.id, job.type, jobTypeMeta(job.type).label, job.submittedBy, job.resultUrl]
+  const haystack = [job.id, job.type, jobTypeMeta(job.type).label, job.submittedBy, job.resultUrl, job.output]
     .filter(Boolean)
     .join(' ')
     .toLowerCase()

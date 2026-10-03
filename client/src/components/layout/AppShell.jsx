@@ -5,6 +5,8 @@ import { ShellContext } from '../../context/shellContext.js'
 import { useApplyJobUpdate } from '../../hooks/useJobs'
 import { useHotkey } from '../../hooks/useHotkey'
 import { useJobSocket } from '../../hooks/useJobSocket'
+import { appendDelta, clearStream } from '../../lib/jobStream'
+import { isFinished } from '../../lib/jobTypes'
 import { useLocation } from '../../lib/router'
 import NewJobDialog from '../jobs/NewJobDialog'
 import Button from '../ui/Button'
@@ -27,7 +29,15 @@ export default function AppShell({ children }) {
   const isFirstRoute = useRef(true)
 
   const applyJobUpdate = useApplyJobUpdate()
-  const realtimeConnected = useJobSocket({ token, isAdmin, onJobUpdate: applyJobUpdate })
+  const onJobUpdate = useCallback(
+    (job) => {
+      applyJobUpdate(job)
+      // The saved output replaces the live text once the job is done
+      if (isFinished(job.status)) clearStream(job.id)
+    },
+    [applyJobUpdate]
+  )
+  const realtimeConnected = useJobSocket({ token, isAdmin, onJobUpdate, onStreamDelta: appendDelta })
 
   const openNewJob = useCallback(() => setNewJobOpen(true), [])
   const closeNewJob = useCallback(() => setNewJobOpen(false), [])

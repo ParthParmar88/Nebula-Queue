@@ -1,6 +1,7 @@
 package io.parth.nebulaqueue.config;
 
 import java.security.Principal;
+import java.util.Set;
 
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
@@ -33,7 +34,14 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class WebSocketAuthInterceptor implements ChannelInterceptor {
 
-    private static final String USER_JOBS_DESTINATION = "/user" + JobStatusPublisher.USER_QUEUE;
+    /** The caller's own queues; Spring resolves them to the current session's user. */
+    private static final Set<String> USER_DESTINATIONS = Set.of(
+            "/user" + JobStatusPublisher.USER_QUEUE,
+            "/user" + JobStatusPublisher.USER_STREAM_QUEUE);
+
+    private static final Set<String> ADMIN_DESTINATIONS = Set.of(
+            JobStatusPublisher.ADMIN_TOPIC,
+            JobStatusPublisher.ADMIN_STREAM_TOPIC);
 
     private final JwtUtil jwtUtil;
     private final UserDetailsService userDetailsService;
@@ -76,10 +84,10 @@ public class WebSocketAuthInterceptor implements ChannelInterceptor {
         if (!(principal instanceof Authentication auth) || destination == null) {
             throw new AccessDeniedException("Not authenticated");
         }
-        if (USER_JOBS_DESTINATION.equals(destination)) {
+        if (USER_DESTINATIONS.contains(destination)) {
             return;
         }
-        if (JobStatusPublisher.ADMIN_TOPIC.equals(destination) && isAdmin(auth)) {
+        if (ADMIN_DESTINATIONS.contains(destination) && isAdmin(auth)) {
             return;
         }
         throw new AccessDeniedException("Cannot subscribe to " + destination);

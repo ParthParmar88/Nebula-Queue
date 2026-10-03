@@ -93,6 +93,18 @@ class WebSocketAuthInterceptorTest {
     }
 
     @Test
+    void userCanSubscribeToOwnStreamButNotTheAdminStream() {
+        interceptor.preSend(subscribe(alice, "/user/queue/job-stream"), null);
+        assertThatThrownBy(() -> interceptor.preSend(subscribe(alice, "/topic/admin/job-stream"), null))
+                .isInstanceOf(AccessDeniedException.class);
+    }
+
+    @Test
+    void adminCanSubscribeToAdminStream() {
+        interceptor.preSend(subscribe(admin, "/topic/admin/job-stream"), null);
+    }
+
+    @Test
     void cannotSubscribeToArbitraryDestinations() {
         // e.g. another session's resolved user queue
         assertThatThrownBy(() -> interceptor.preSend(subscribe(admin, "/queue/jobs-user123"), null))

@@ -28,6 +28,16 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.CONFLICT, ex.getMessage());
     }
 
+    @ExceptionHandler(InvalidJobRequestException.class)
+    public ResponseEntity<ApiError> handleInvalidRequest(InvalidJobRequestException ex) {
+        return error(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
+    @ExceptionHandler(TooManyJobsException.class)
+    public ResponseEntity<ApiError> handleTooManyJobs(TooManyJobsException ex) {
+        return error(HttpStatus.TOO_MANY_REQUESTS, ex.getMessage());
+    }
+
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ApiError> handleAccessDenied(AccessDeniedException ex) {
         return error(HttpStatus.FORBIDDEN, ex.getMessage());

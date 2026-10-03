@@ -3,6 +3,7 @@ package io.parth.nebulaqueue.model;
 import jakarta.persistence.*;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import java.math.BigDecimal;
 import java.time.Instant;
 
 @Entity
@@ -30,6 +31,17 @@ public class Job {
     private String resultUrl;    // where the output file lives after completion
 
     private String submittedBy;  // email from JWT
+
+    // ── AI jobs ──────────────────────────────────────────────────────────
+    @Column(columnDefinition = "TEXT")
+    private String output;       // generated text
+
+    private String model;        // e.g. the OpenAI model that produced `output`
+    private Integer inputTokens;
+    private Integer outputTokens;
+
+    @Column(precision = 12, scale = 6)
+    private BigDecimal costUsd;  // null when pricing isn't configured on the worker
 
     // Instant (UTC) so the JSON always carries a timezone ("...Z") and the browser
     // shows the right local time regardless of the server's timezone.

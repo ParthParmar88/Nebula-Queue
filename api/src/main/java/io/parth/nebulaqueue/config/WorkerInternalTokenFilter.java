@@ -1,6 +1,8 @@
 package io.parth.nebulaqueue.config;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -18,15 +20,14 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 /**
- * Authenticates the background worker for PATCH requests to
- * {@code /internal/worker/jobs/{id}/status} using the {@code X-Worker-Token} header,
- * without requiring a user JWT.
+ * Authenticates background workers on every {@code /internal/worker/**} route using the
+ * {@code X-Worker-Token} header, without requiring a user JWT. Requests to those routes
+ * without a valid token are rejected here, before any other authentication applies.
  */
 @Component
 public class WorkerInternalTokenFilter extends OncePerRequestFilter {
 
-    private static final Pattern WORKER_STATUS_PATCH =
-            Pattern.compile("^/internal/worker/jobs/[^/]+/status$");
+    private static final Pattern WORKER_PATH = Pattern.compile("^/internal/worker/.*");
 
     @Value("${app.worker.internal-token:}")
     private String expectedToken;
@@ -36,8 +37,7 @@ public class WorkerInternalTokenFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
-        if (!"PATCH".equalsIgnoreCase(request.getMethod())
-                || !matchesWorkerStatusPath(request)) {
+        if (!matchesWorkerPath(request)) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -49,7 +49,9 @@ public class WorkerInternalTokenFilter extends OncePerRequestFilter {
         }
 
         String presented = request.getHeader("X-Worker-Token");
-        if (presented == null || !expectedToken.equals(presented)) {
+        // constant-time comparison, so response timing doesn't leak how much of the token matched
+        if (presented == null || !MessageDigest.isEqual(
+                expectedToken.getBytes(StandardCharsets.UTF_8), presented.getBytes(StandardCharsets.UTF_8))) {
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Invalid worker token");
             return;
         }
@@ -62,12 +64,12 @@ public class WorkerInternalTokenFilter extends OncePerRequestFilter {
         filterChain.doFilter(request, response);
     }
 
-    private static boolean matchesWorkerStatusPath(HttpServletRequest request) {
+    private static boolean matchesWorkerPath(HttpServletRequest request) {
         String uri = request.getRequestURI();
         String context = request.getContextPath();
         if (context != null && !context.isEmpty() && uri.startsWith(context)) {
             uri = uri.substring(context.length());
         }
-        return WORKER_STATUS_PATCH.matcher(uri).matches();
+        return WORKER_PATH.matcher(uri).matches();
     }
 }

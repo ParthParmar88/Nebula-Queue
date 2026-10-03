@@ -49,6 +49,27 @@ services:
       EMAIL_USER: ${EMAIL_USER:-}
       EMAIL_PASS: ${EMAIL_PASS:-}
 
+  # Python worker for AI jobs (consumes ai-job-queue, streams tokens back via job-events)
+  ai-worker:
+    build: ./ai-worker
+    container_name: nq-ai-worker
+    restart: on-failure
+    depends_on:
+      - rabbitmq
+      - api
+    environment:
+      API_URL: http://api:9090
+      WORKER_INTERNAL_TOKEN: dev-worker-token
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: admin
+      RABBITMQ_PASS: admin123
+      # From .env — see .env.example
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_PRICE_INPUT_PER_1M: ${OPENAI_PRICE_INPUT_PER_1M:-}
+      OPENAI_PRICE_OUTPUT_PER_1M: ${OPENAI_PRICE_OUTPUT_PER_1M:-}
+
   client:
     build: ./client
     container_name: nq-client

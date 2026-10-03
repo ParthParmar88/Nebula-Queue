@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ArrowLeft, ArrowUpRight, FileQuestion, Lock, RefreshCw } from 'lucide-react'
 import { getErrorMessage, getErrorStatus } from '../api/errors'
+import { AiOutputCard, PromptCard, UsageCard } from '../components/jobs/AiJobPanels'
 import CancelJobDialog from '../components/jobs/CancelJobDialog'
 import JobTimeline from '../components/jobs/JobTimeline'
 import JobTypeIcon from '../components/jobs/JobTypeIcon'
@@ -17,12 +18,13 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useJobQuery } from '../hooks/useJobs'
 import { useNow } from '../hooks/useNow'
 import { formatDateTime, formatDuration, formatRelative, isHttpUrl, prettyJson, shortId } from '../lib/format'
-import { jobTypeMeta, STATUS_LABELS } from '../lib/jobTypes'
+import { isAiJob, jobTypeMeta, STATUS_LABELS } from '../lib/jobTypes'
 
 export default function JobDetailPage({ id }) {
   const { data: job, isPending, isError, error, refetch, isFetching } = useJobQuery(id)
   const [cancelOpen, setCancelOpen] = useState(false)
   const meta = job ? jobTypeMeta(job.type) : null
+  const ai = isAiJob(job)
   useDocumentTitle(meta ? `${meta.label} ${shortId(id)}` : `Job ${shortId(id)}`)
 
   const breadcrumbs = [{ label: 'Jobs', to: '/jobs' }, { label: shortId(id) }]
@@ -97,10 +99,21 @@ export default function JobDetailPage({ id }) {
 
         <div className="grid items-start gap-6 lg:grid-cols-3">
           <div className="flex min-w-0 flex-col gap-6 lg:col-span-2">
-            {job.status === 'COMPLETED' && <ResultCard result={job.resultUrl} />}
-            <PayloadCard payload={job.payload} />
+            {ai ? (
+              <>
+                {/* failed/cancelled jobs have no response; the status banner explains why */}
+                {job.status !== 'CANCELLED' && job.status !== 'FAILED' && <AiOutputCard job={job} />}
+                <PromptCard payload={job.payload} />
+              </>
+            ) : (
+              <>
+                {job.status === 'COMPLETED' && <ResultCard result={job.resultUrl} />}
+                <PayloadCard payload={job.payload} />
+              </>
+            )}
           </div>
           <div className="flex flex-col gap-6">
+            {ai && <UsageCard job={job} />}
             <Card>
               <CardHeader title="Lifecycle" />
               <div className="px-5 py-4">
@@ -142,7 +155,7 @@ function StatusBanner({ job }) {
         </Alert>
       )
     case 'PROCESSING':
-      return (
+      return isAiJob(job) ? null : (
         <Alert tone="info" title="Processing">
           A worker is running this job now. The result will appear here when it finishes.
         </Alert>
