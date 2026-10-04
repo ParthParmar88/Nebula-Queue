@@ -23,6 +23,11 @@ public class JobPayloadValidator {
     public static final int MAX_OUTPUT_TOKENS = 4_000;
     public static final int MAX_QUESTION_CHARS = 2_000;
     public static final int MAX_ASK_DOCUMENTS = 20;
+    public static final int MAX_EVAL_CASES = 20;
+    public static final int MAX_EXPECTED_CHARS = 2_000;
+    public static final int MAX_EVAL_NAME_CHARS = 100;
+    public static final int MAX_TOP_K = 10;
+    public static final int DEFAULT_TOP_K = 5;
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
@@ -35,12 +40,59 @@ public class JobPayloadValidator {
     public record AskPayload(String question, List<String> documentIds) {
     }
 
+    /** What a user sends for EVAL_RUN. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EvalPayload(String name, List<String> documentIds, Integer topK, List<EvalCaseInput> cases) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EvalCaseInput(String question, String expected, String expectedDocumentId, Integer expectedPage) {
+    }
+
     public void validate(JobType type, String payload) {
         switch (type) {
             case AI_GENERATE -> validateGenerate(payload);
             case AI_ASK -> parseAsk(payload);
+            case EVAL_RUN -> parseEval(payload);
             default -> { }
         }
+    }
+
+    public EvalPayload parseEval(String payload) {
+        EvalPayload p = read(payload, EvalPayload.class,
+                "EVAL_RUN payload must be a JSON object like {\"cases\": [{\"question\": \"…\", \"expected\": \"…\"}]}");
+        if (p.name() != null && p.name().length() > MAX_EVAL_NAME_CHARS) {
+            throw new InvalidJobRequestException("Name is too long (max " + MAX_EVAL_NAME_CHARS + " characters)");
+        }
+        if (p.topK() != null && (p.topK() < 1 || p.topK() > MAX_TOP_K)) {
+            throw new InvalidJobRequestException("topK must be between 1 and " + MAX_TOP_K);
+        }
+        if (p.documentIds() != null && p.documentIds().size() > MAX_ASK_DOCUMENTS) {
+            throw new InvalidJobRequestException("Evaluate at most " + MAX_ASK_DOCUMENTS + " documents at once");
+        }
+        if (p.cases() == null || p.cases().isEmpty()) {
+            throw new InvalidJobRequestException("Add at least one test case");
+        }
+        if (p.cases().size() > MAX_EVAL_CASES) {
+            throw new InvalidJobRequestException("An evaluation can have at most " + MAX_EVAL_CASES + " cases");
+        }
+        for (int i = 0; i < p.cases().size(); i++) {
+            EvalCaseInput c = p.cases().get(i);
+            String label = "Case " + (i + 1) + ": ";
+            if (c == null || c.question() == null || c.question().isBlank()) {
+                throw new InvalidJobRequestException(label + "add a question");
+            }
+            if (c.expected() == null || c.expected().isBlank()) {
+                throw new InvalidJobRequestException(label + "add the expected answer");
+            }
+            if (c.question().length() > MAX_QUESTION_CHARS || c.expected().length() > MAX_EXPECTED_CHARS) {
+                throw new InvalidJobRequestException(label + "keep the question and expected answer under 2,000 characters");
+            }
+            if (c.expectedPage() != null && c.expectedPage() < 1) {
+                throw new InvalidJobRequestException(label + "the expected page must be 1 or higher");
+            }
+        }
+        return p;
     }
 
     public AskPayload parseAsk(String payload) {

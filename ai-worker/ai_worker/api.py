@@ -38,6 +38,7 @@ class ApiClient:
         usage: Usage | None = None,
         cost: Decimal | None = None,
         sources: str | None = None,
+        report: str | None = None,
     ) -> None:
         body = {
             "status": status,
@@ -48,6 +49,7 @@ class ApiClient:
             "outputTokens": usage.output_tokens if usage else None,
             "costUsd": str(cost) if cost is not None else None,
             "sources": sources,
+            "report": report,
         }
         response = await self._client.post(
             f"/internal/worker/jobs/{job_id}/finish",

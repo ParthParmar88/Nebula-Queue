@@ -5,13 +5,15 @@ import { useDocumentsQuery } from '../../hooks/useDocuments'
 import { useSubmitJob } from '../../hooks/useJobs'
 import { cn } from '../../lib/cn'
 import { formatNumber, shortId } from '../../lib/format'
-import { AI_LIMITS, JOB_TYPE_ORDER, JOB_TYPES } from '../../lib/jobTypes'
+import { AI_LIMITS, emptyEvalCase, JOB_TYPE_ORDER, JOB_TYPES } from '../../lib/jobTypes'
 import { navigate } from '../../lib/router'
 import Alert from '../ui/Alert'
 import Badge from '../ui/Badge'
 import Button from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
 import { Field, Input, Textarea } from '../ui/Field'
+import { DocumentPicker, NoReadyDocuments } from './DocumentPicker'
+import EvalFields from './EvalFields'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -28,6 +30,15 @@ function NewJobForm({ preset, onClose }) {
   const [type, setType] = useState(preset.type ?? 'AI_GENERATE')
   const [ai, setAi] = useState({ prompt: '', system: '' })
   const [ask, setAsk] = useState({ question: '', documentIds: preset.documentIds ?? [] })
+  const [evaluation, setEvaluation] = useState(
+    () =>
+      preset.evalConfig ?? {
+        name: '',
+        topK: AI_LIMITS.defaultTopK,
+        documentIds: preset.documentIds ?? [],
+        cases: [emptyEvalCase(), emptyEvalCase()],
+      }
+  )
   const [email, setEmail] = useState({ to: '', subject: '', body: '' })
   const [payload, setPayload] = useState('')
   const [errors, setErrors] = useState({})
@@ -43,6 +54,17 @@ function NewJobForm({ preset, onClose }) {
     } else if (type === 'AI_ASK') {
       if (!ask.question.trim()) next.question = 'Write a question.'
       else if (ask.question.length > AI_LIMITS.questionChars) next.question = `Keep the question under ${formatNumber(AI_LIMITS.questionChars)} characters.`
+    } else if (type === 'EVAL_RUN') {
+      const caseErrors = {}
+      evaluation.cases.forEach((c, i) => {
+        const e = {}
+        if (!c.question.trim()) e.question = 'Write a question.'
+        else if (c.question.length > AI_LIMITS.questionChars) e.question = 'Keep the question under 2,000 characters.'
+        if (!c.expected.trim()) e.expected = 'Write the expected answer.'
+        else if (c.expected.length > AI_LIMITS.expectedChars) e.expected = 'Keep the expected answer under 2,000 characters.'
+        if (Object.keys(e).length) caseErrors[i] = e
+      })
+      if (Object.keys(caseErrors).length) next.cases = caseErrors
     } else if (type === 'EMAIL_SEND') {
       if (!EMAIL_PATTERN.test(email.to.trim())) next.to = 'Enter a valid email address.'
       if (!email.subject.trim()) next.subject = 'Add a subject.'
@@ -65,6 +87,19 @@ function NewJobForm({ preset, onClose }) {
     if (type === 'AI_ASK') {
       // No selection = the API searches all of the user's ready documents
       return JSON.stringify({ question: ask.question, ...(ask.documentIds.length ? { documentIds: ask.documentIds } : {}) })
+    }
+    if (type === 'EVAL_RUN') {
+      return JSON.stringify({
+        ...(evaluation.name.trim() ? { name: evaluation.name.trim() } : {}),
+        topK: evaluation.topK,
+        ...(evaluation.documentIds.length ? { documentIds: evaluation.documentIds } : {}),
+        cases: evaluation.cases.map((c) => ({
+          question: c.question,
+          expected: c.expected,
+          ...(c.expectedDocumentId ? { expectedDocumentId: c.expectedDocumentId } : {}),
+          ...(c.expectedDocumentId && Number(c.expectedPage) >= 1 ? { expectedPage: Number(c.expectedPage) } : {}),
+        })),
+      })
     }
     if (type === 'EMAIL_SEND') {
       return JSON.stringify({ to: email.to.trim(), subject: email.subject.trim(), body: email.body })
@@ -90,9 +125,10 @@ function NewJobForm({ preset, onClose }) {
             // The interesting part of an AI job is watching it write — go straight there
             navigate(`/jobs/${job.id}`)
             toast(
-              type === 'AI_ASK'
-                ? { title: 'Searching your documents…', description: 'The answer streams in with citations.' }
-                : { title: 'Generating…', description: 'The response streams in as the model writes it.' }
+              {
+                AI_ASK: { title: 'Searching your documents…', description: 'The answer streams in with citations.' },
+                EVAL_RUN: { title: 'Evaluation started', description: 'Each case’s scores appear as it finishes.' },
+              }[type] ?? { title: 'Generating…', description: 'The response streams in as the model writes it.' }
             )
           } else {
             toast({
@@ -131,7 +167,7 @@ function NewJobForm({ preset, onClose }) {
         <>
           <Button onClick={onClose}>Cancel</Button>
           <Button type="submit" form={formId} variant="primary" loading={submit.isPending}>
-            {type === 'AI_ASK' ? 'Ask' : meta.streams ? 'Generate' : 'Submit job'}
+            {{ AI_ASK: 'Ask', EVAL_RUN: 'Run evaluation', AI_GENERATE: 'Generate' }[type] ?? 'Submit job'}
           </Button>
         </>
       }
@@ -235,6 +271,21 @@ function NewJobForm({ preset, onClose }) {
           </div>
         )}
 
+        {type === 'EVAL_RUN' && (
+          <EvalFields
+            value={evaluation}
+            errors={errors}
+            onChange={(next) => {
+              setEvaluation(next)
+              if (errors.cases) setErrors((e) => ({ ...e, cases: undefined }))
+            }}
+            onGoToDocuments={() => {
+              onClose()
+              navigate('/documents')
+            }}
+          />
+        )}
+
         {type === 'AI_ASK' && (
           <AskFields
             ask={ask}
@@ -314,28 +365,10 @@ function NewJobForm({ preset, onClose }) {
 function AskFields({ ask, errors, onQuestion, onDocuments, onGoToDocuments }) {
   const { data: documents, isPending } = useDocumentsQuery()
   const ready = (documents ?? []).filter((d) => d.status === 'READY')
-  const indexing = (documents ?? []).filter((d) => d.status === 'PROCESSING').length
-
-  function toggle(id) {
-    onDocuments(ask.documentIds.includes(id) ? ask.documentIds.filter((x) => x !== id) : [...ask.documentIds, id])
-  }
+  const indexing = (documents ?? []).some((d) => d.status === 'PROCESSING')
 
   if (!isPending && ready.length === 0) {
-    return (
-      <Alert
-        tone="info"
-        title={indexing ? 'Your documents are still being indexed' : 'No documents to search yet'}
-        action={
-          <Button size="sm" onClick={onGoToDocuments}>
-            {indexing ? 'View documents' : 'Upload a document'}
-          </Button>
-        }
-      >
-        {indexing
-          ? 'You can ask questions as soon as indexing finishes — usually a few seconds.'
-          : 'Upload a PDF, .txt or .md file first; answers are grounded in what you upload.'}
-      </Alert>
-    )
+    return <NoReadyDocuments indexing={indexing} onGoToDocuments={onGoToDocuments} />
   }
 
   return (
@@ -353,33 +386,7 @@ function AskFields({ ask, errors, onQuestion, onDocuments, onGoToDocuments }) {
           placeholder="What does the onboarding guide say about security training?"
         />
       </Field>
-      <fieldset>
-        <legend className="mb-1.5 flex w-full items-center justify-between text-13 font-medium text-fg">
-          Documents
-          <span className="font-normal text-fg-muted">
-            {ask.documentIds.length ? `${ask.documentIds.length} selected` : `All ${ready.length} ready`}
-          </span>
-        </legend>
-        <ul className="max-h-48 divide-y divide-border overflow-y-auto rounded-md border border-border">
-          {ready.map((doc) => (
-            <li key={doc.id}>
-              <label className="flex cursor-pointer items-center gap-3 px-3 py-2 text-13 transition-colors hover:bg-surface-2/60">
-                <input
-                  type="checkbox"
-                  checked={ask.documentIds.includes(doc.id)}
-                  onChange={() => toggle(doc.id)}
-                  className="size-4 rounded border-border-strong accent-[rgb(var(--accent))]"
-                />
-                <span className="min-w-0 flex-1 truncate text-fg">{doc.filename}</span>
-                {doc.pageCount != null && (
-                  <span className="shrink-0 text-xs text-fg-muted">{doc.pageCount} pages</span>
-                )}
-              </label>
-            </li>
-          ))}
-        </ul>
-        <p className="mt-1.5 text-13 text-fg-muted">Leave all unticked to search every ready document.</p>
-      </fieldset>
+      <DocumentPicker documents={ready} selectedIds={ask.documentIds} onChange={onDocuments} />
     </div>
   )
 }

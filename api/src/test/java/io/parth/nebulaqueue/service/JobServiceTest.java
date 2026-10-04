@@ -95,6 +95,56 @@ class JobServiceTest {
         verify(jobProducer, never()).sendJob(any());
     }
 
+    // ── evaluations ──────────────────────────────────────────────────────────
+
+    @Test
+    void evalIsPinnedToReadyDocumentsWithDefaults() {
+        signIn("alice@example.com", "ROLE_USER");
+        when(documentRepository.findByOwnerAndStatusOrderByCreatedAtDesc("alice@example.com", DocumentStatus.READY))
+                .thenReturn(List.of(document("d1", "alice@example.com", DocumentStatus.READY)));
+
+        Job saved = jobService.submitJob(new SubmitJobRequest(JobType.EVAL_RUN,
+                "{\"cases\": [{\"question\": \" Q? \", \"expected\": \" A \", \"expectedDocumentId\": \"d1\", \"expectedPage\": 2}]}"));
+
+        assertThat(saved.getPayload()).isEqualTo("{\"name\":\"Evaluation\",\"topK\":5,"
+                + "\"documents\":[{\"id\":\"d1\",\"filename\":\"d1.pdf\"}],"
+                + "\"cases\":[{\"question\":\"Q?\",\"expected\":\"A\",\"expectedDocumentId\":\"d1\",\"expectedPage\":2}]}");
+    }
+
+    @Test
+    void evalRejectsAnExpectedDocumentOutsideTheEvaluatedSet() {
+        signIn("alice@example.com", "ROLE_USER");
+        when(documentRepository.findByOwnerAndStatusOrderByCreatedAtDesc("alice@example.com", DocumentStatus.READY))
+                .thenReturn(List.of(document("d1", "alice@example.com", DocumentStatus.READY)));
+
+        assertThatThrownBy(() -> jobService.submitJob(new SubmitJobRequest(JobType.EVAL_RUN,
+                "{\"cases\": [{\"question\": \"Q?\", \"expected\": \"A\", \"expectedDocumentId\": \"someone-elses\"}]}")))
+                .isInstanceOf(InvalidJobRequestException.class)
+                .hasMessageContaining("Case 1");
+    }
+
+    @Test
+    void evalCountsTowardTheAiCap() {
+        signIn("alice@example.com", "ROLE_USER");
+        when(jobRepository.countBySubmittedByAndTypeInAndStatusIn(eq("alice@example.com"), anyCollection(), anyCollection()))
+                .thenReturn(3L);
+
+        assertThatThrownBy(() -> jobService.submitJob(new SubmitJobRequest(JobType.EVAL_RUN,
+                "{\"cases\": [{\"question\": \"Q?\", \"expected\": \"A\"}]}")))
+                .isInstanceOf(UsageLimitException.class);
+    }
+
+    @Test
+    void finishStoresTheEvalReport() {
+        signIn("worker", "ROLE_ADMIN");
+        when(jobRepository.findById("j1")).thenReturn(Optional.of(job("j1", "alice@example.com", JobStatus.PROCESSING)));
+
+        Job done = jobService.finishJob("j1", new WorkerResultRequest(
+                JobStatus.COMPLETED, null, "summary", null, null, null, null, null, "{\"summary\":{}}"));
+
+        assertThat(done.getReport()).isEqualTo("{\"summary\":{}}");
+    }
+
     @Test
     void ingestJobsCannotBeSubmittedByUsers() {
         signIn("alice@example.com", "ROLE_USER");
@@ -113,7 +163,7 @@ class JobServiceTest {
         when(documentRepository.findByIngestJobId("j1")).thenReturn(Optional.of(doc));
 
         jobService.finishJob("j1", new WorkerResultRequest(
-                JobStatus.FAILED, "Error: worker crashed", null, null, null, null, null, null));
+                JobStatus.FAILED, "Error: worker crashed", null, null, null, null, null, null, null));
 
         assertThat(doc.getStatus()).isEqualTo(DocumentStatus.FAILED);
         assertThat(doc.getError()).isEqualTo("Error: worker crashed");
@@ -159,7 +209,7 @@ class JobServiceTest {
         when(jobRepository.findById("j1")).thenReturn(Optional.of(job("j1", "alice@example.com", JobStatus.PROCESSING)));
 
         Job done = jobService.finishJob("j1", new WorkerResultRequest(
-                JobStatus.COMPLETED, null, "Hello!", "gpt-test", 12, 3, new BigDecimal("0.000042"), null));
+                JobStatus.COMPLETED, null, "Hello!", "gpt-test", 12, 3, new BigDecimal("0.000042"), null, null));
 
         assertThat(done.getStatus()).isEqualTo(JobStatus.COMPLETED);
         assertThat(done.getOutput()).isEqualTo("Hello!");
@@ -176,7 +226,7 @@ class JobServiceTest {
         signIn("worker", "ROLE_ADMIN");
 
         assertThatThrownBy(() -> jobService.finishJob("j1",
-                new WorkerResultRequest(JobStatus.PROCESSING, null, null, null, null, null, null, null)))
+                new WorkerResultRequest(JobStatus.PROCESSING, null, null, null, null, null, null, null, null)))
                 .isInstanceOf(InvalidJobRequestException.class);
     }
 

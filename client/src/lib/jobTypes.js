@@ -1,4 +1,4 @@
-import { FileSearch, FileStack, FileText, Image, Layers, Mail, Sparkles } from 'lucide-react'
+import { FileSearch, FileStack, FileText, FlaskConical, Image, Layers, Mail, Sparkles } from 'lucide-react'
 
 /**
  * UI metadata for each job type the API accepts (see JobType.java).
@@ -20,6 +20,14 @@ export const JOB_TYPES = {
     label: 'Ask documents',
     description: 'Answer a question from your uploaded documents, citing the passages it used.',
     icon: FileSearch,
+    implemented: true,
+    ai: true,
+    streams: true,
+  },
+  EVAL_RUN: {
+    label: 'Run evaluation',
+    description: 'Score document Q&A on test questions: correctness, faithfulness and retrieval, judged by an LLM.',
+    icon: FlaskConical,
     implemented: true,
     ai: true,
     streams: true,
@@ -59,13 +67,56 @@ export const JOB_TYPES = {
 }
 
 /** Types offered in the New job dialog, in display order (internal types excluded). */
-export const JOB_TYPE_ORDER = ['AI_GENERATE', 'AI_ASK', 'EMAIL_SEND', 'IMAGE_RESIZE', 'PDF_GENERATE', 'BATCH']
+export const JOB_TYPE_ORDER = ['AI_GENERATE', 'AI_ASK', 'EVAL_RUN', 'EMAIL_SEND', 'IMAGE_RESIZE', 'PDF_GENERATE', 'BATCH']
 
 /** Every type, for breakdowns and filters. */
-export const ALL_JOB_TYPES = ['AI_GENERATE', 'AI_ASK', 'INGEST_DOCUMENT', 'EMAIL_SEND', 'IMAGE_RESIZE', 'PDF_GENERATE', 'BATCH']
+export const ALL_JOB_TYPES = [
+  'AI_GENERATE', 'AI_ASK', 'EVAL_RUN', 'INGEST_DOCUMENT', 'EMAIL_SEND', 'IMAGE_RESIZE', 'PDF_GENERATE', 'BATCH',
+]
 
 /** Must match JobPayloadValidator on the API. */
-export const AI_LIMITS = { promptChars: 8000, systemChars: 4000, questionChars: 2000, askDocuments: 20 }
+export const AI_LIMITS = {
+  promptChars: 8000,
+  systemChars: 4000,
+  questionChars: 2000,
+  expectedChars: 2000,
+  askDocuments: 20,
+  evalCases: 20,
+  maxTopK: 10,
+  defaultTopK: 5,
+}
+
+export const emptyEvalCase = () => ({ question: '', expected: '', expectedDocumentId: '', expectedPage: '' })
+
+/** The EVAL_RUN report (`job.report` JSON), or null. */
+export function parseReport(json) {
+  try {
+    const value = JSON.parse(json ?? 'null')
+    return value && typeof value === 'object' && value.summary ? value : null
+  } catch {
+    return null
+  }
+}
+
+/** The settings an evaluation ran with, from its payload — used to re-run it. */
+export function evalConfigFromPayload(payload) {
+  try {
+    const p = JSON.parse(payload)
+    return {
+      name: p.name ?? '',
+      topK: p.topK ?? AI_LIMITS.defaultTopK,
+      documentIds: (p.documents ?? []).map((d) => d.id),
+      cases: (p.cases ?? []).map((c) => ({
+        question: c.question ?? '',
+        expected: c.expected ?? '',
+        expectedDocumentId: c.expectedDocumentId ?? '',
+        expectedPage: c.expectedPage ?? '',
+      })),
+    }
+  } catch {
+    return null
+  }
+}
 
 export const isAiJob = (job) => Boolean(JOB_TYPES[job?.type]?.ai)
 

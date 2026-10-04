@@ -1,8 +1,11 @@
 package io.parth.nebulaqueue.service;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Sort;
@@ -13,6 +16,7 @@ import org.springframework.stereotype.Service;
 
 import io.parth.nebulaqueue.config.JobStatusPublisher;
 import io.parth.nebulaqueue.dto.AskJobPayload;
+import io.parth.nebulaqueue.dto.EvalJobPayload;
 import io.parth.nebulaqueue.dto.IngestJobPayload;
 import io.parth.nebulaqueue.dto.SubmitJobRequest;
 import io.parth.nebulaqueue.dto.WorkerResultRequest;
@@ -63,9 +67,11 @@ public class JobService {
             }
         }
 
-        String payload = request.type() == JobType.AI_ASK
-                ? resolveAskPayload(currentUser, payloadValidator.parseAsk(request.payload()))
-                : request.payload();
+        String payload = switch (request.type()) {
+            case AI_ASK -> resolveAskPayload(currentUser, payloadValidator.parseAsk(request.payload()));
+            case EVAL_RUN -> resolveEvalPayload(currentUser, payloadValidator.parseEval(request.payload()));
+            default -> request.payload();
+        };
         return queue(request.type(), payload, currentUser);
     }
 
@@ -88,21 +94,44 @@ public class JobService {
         return savedJob;
     }
 
+    private String resolveAskPayload(String user, JobPayloadValidator.AskPayload ask) {
+        List<AskJobPayload.DocumentRef> refs = resolveDocuments(user, ask.documentIds());
+        return payloadValidator.toJson(new AskJobPayload(ask.question().trim(), refs));
+    }
+
+    private String resolveEvalPayload(String user, JobPayloadValidator.EvalPayload eval) {
+        List<AskJobPayload.DocumentRef> refs = resolveDocuments(user, eval.documentIds());
+        Set<String> searchable = refs.stream().map(AskJobPayload.DocumentRef::id).collect(Collectors.toSet());
+
+        List<EvalJobPayload.Case> cases = new ArrayList<>();
+        for (int i = 0; i < eval.cases().size(); i++) {
+            JobPayloadValidator.EvalCaseInput c = eval.cases().get(i);
+            if (c.expectedDocumentId() != null && !searchable.contains(c.expectedDocumentId())) {
+                throw new InvalidJobRequestException(
+                        "Case " + (i + 1) + ": the expected document isn't among the documents being evaluated.");
+            }
+            cases.add(new EvalJobPayload.Case(c.question().trim(), c.expected().trim(), c.expectedDocumentId(), c.expectedPage()));
+        }
+        String name = eval.name() == null || eval.name().isBlank() ? "Evaluation" : eval.name().trim();
+        int topK = eval.topK() == null ? JobPayloadValidator.DEFAULT_TOP_K : eval.topK();
+        return payloadValidator.toJson(new EvalJobPayload(name, topK, refs, cases));
+    }
+
     /**
-     * Pin an AI_ASK job to concrete documents the user owns and that are ready to search.
+     * Pin a job to concrete documents the user owns and that are ready to search.
      * No ids means "all my ready documents". Unknown or foreign ids get the same message,
      * so the API doesn't reveal which document ids exist.
      */
-    private String resolveAskPayload(String user, JobPayloadValidator.AskPayload ask) {
+    private List<AskJobPayload.DocumentRef> resolveDocuments(String user, List<String> documentIds) {
         List<Document> documents;
-        if (ask.documentIds() == null || ask.documentIds().isEmpty()) {
+        if (documentIds == null || documentIds.isEmpty()) {
             documents = documentRepository.findByOwnerAndStatusOrderByCreatedAtDesc(user, DocumentStatus.READY);
             if (documents.isEmpty()) {
                 throw new InvalidJobRequestException(
                         "Upload a document and wait for it to finish indexing before asking questions.");
             }
         } else {
-            List<String> ids = ask.documentIds().stream().distinct().toList();
+            List<String> ids = documentIds.stream().distinct().toList();
             documents = documentRepository.findAllById(ids);
             if (documents.size() != ids.size() || documents.stream().anyMatch(d -> !user.equals(d.getOwner()))) {
                 throw new InvalidJobRequestException("Some selected documents don't exist.");
@@ -111,10 +140,7 @@ public class JobService {
                 throw new InvalidJobRequestException("“" + d.getFilename() + "” isn't ready to search yet.");
             });
         }
-        List<AskJobPayload.DocumentRef> refs = documents.stream()
-                .map(d -> new AskJobPayload.DocumentRef(d.getId(), d.getFilename()))
-                .toList();
-        return payloadValidator.toJson(new AskJobPayload(ask.question().trim(), refs));
+        return documents.stream().map(d -> new AskJobPayload.DocumentRef(d.getId(), d.getFilename())).toList();
     }
 
     // Update status — workers call this; admins can also call it manually
@@ -141,6 +167,7 @@ public class JobService {
         if (result.outputTokens() != null) job.setOutputTokens(result.outputTokens());
         if (result.costUsd() != null) job.setCostUsd(result.costUsd());
         if (result.sources() != null) job.setSources(result.sources());
+        if (result.report() != null) job.setReport(result.report());
 
         // Safety net: if indexing failed before the worker could report it, don't leave the
         // document stuck in PROCESSING forever.

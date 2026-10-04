@@ -1,4 +1,4 @@
-import { FileText, LayoutDashboard, ListChecks, Plus, X } from 'lucide-react'
+import { FileText, FlaskConical, LayoutDashboard, ListChecks, Plus, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { useLocation } from '../../lib/router'
 import { useShell } from '../../context/shellContext.js'
@@ -14,6 +14,7 @@ const NAV = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, isActive: (path) => path === '/' },
   { to: '/jobs', label: 'Jobs', icon: ListChecks, isActive: (path) => path.startsWith('/jobs'), showActive: true },
   { to: '/documents', label: 'Documents', icon: FileText, isActive: (path) => path === '/documents' },
+  { to: '/evals', label: 'Evaluations', icon: FlaskConical, isActive: (path) => path === '/evals' },
 ]
 
 /**

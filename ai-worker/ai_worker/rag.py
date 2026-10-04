@@ -1,11 +1,17 @@
-"""Retrieval-augmented answers: turn search hits into numbered sources and a grounded prompt."""
+"""Retrieval-augmented answers: retrieve passages, build a grounded prompt, generate a cited answer.
+
+`answer_question` is the single pipeline used by both AI_ASK jobs and evaluations, so an
+evaluation measures exactly what users get."""
 
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 
-from .vector_store import SearchHit
+from .config import Settings
+from .llm import LLMProvider, TextDelta, Usage
+from .vector_store import SearchHit, VectorStore
 
 # The retrieved text comes from user-uploaded files, so it is untrusted: a document could
 # contain "ignore your instructions…". The prompt fences it off and says so.
@@ -55,3 +61,54 @@ def build_user_prompt(question: str, sources: list[Source]) -> str:
 
 def sources_json(sources: list[Source]) -> str:
     return json.dumps([asdict(s) for s in sources], ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class Answer:
+    text: str
+    sources: list[Source]
+    usage: Usage | None  # chat tokens; None when no chat call was needed
+    embedding_tokens: int
+    model: str | None  # chat model, or None when no chat call was made
+
+
+async def answer_question(
+    provider: LLMProvider,
+    store: VectorStore,
+    settings: Settings,
+    *,
+    question: str,
+    filenames: dict[str, str],
+    top_k: int,
+    on_delta: Callable[[str], Awaitable[None]] | None = None,
+    temperature: float | None = None,
+) -> Answer:
+    """Embed the question, retrieve the top_k passages from these documents, and answer from them."""
+    query = await provider.embed(
+        [question], model=settings.embedding_model, dimensions=settings.embedding_dimensions
+    )
+    hits = await store.search(query.vectors[0], list(filenames), top_k)
+
+    if not hits:
+        # Nothing indexed matches — answer without spending a chat call
+        if on_delta:
+            await on_delta(NO_RESULTS_ANSWER)
+        return Answer(NO_RESULTS_ANSWER, [], None, query.tokens, None)
+
+    sources = to_sources(hits, filenames)
+    parts: list[str] = []
+    usage: Usage | None = None
+    async for event in provider.stream(
+        model=settings.model,
+        prompt=build_user_prompt(question, sources),
+        system=SYSTEM_PROMPT,
+        max_output_tokens=settings.ask_max_output_tokens,
+        temperature=temperature,
+    ):
+        if isinstance(event, TextDelta):
+            parts.append(event.text)
+            if on_delta:
+                await on_delta(event.text)
+        elif isinstance(event, Usage):
+            usage = event
+    return Answer("".join(parts), sources, usage, query.tokens, settings.model)

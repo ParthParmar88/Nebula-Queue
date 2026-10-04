@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ai_worker.api import JobNotRunnable
 from ai_worker.config import Settings
-from ai_worker.llm import Embeddings, TextDelta, Usage
+from ai_worker.llm import Completion, Embeddings, TextDelta, Usage
 from ai_worker.vector_store import SearchHit
 
 
@@ -31,21 +31,34 @@ def settings(**overrides) -> Settings:
 class FakeProvider:
     """Streams the given chunks, then reports usage. Can fail midway. Embeds deterministically."""
 
-    def __init__(self, chunks=("Hel", "lo", "!"), usage=Usage(10, 3), fail_after: int | None = None):
+    def __init__(
+        self,
+        chunks=("Hel", "lo", "!"),
+        usage=Usage(10, 3),
+        fail_after: int | None = None,
+        judge_reply='{"correctness": 1, "faithfulness": 0.5, "reasoning": "Matches the reference."}',
+    ):
         self.chunks = chunks
         self.usage = usage
         self.fail_after = fail_after
+        self.judge_reply = judge_reply
         self.calls = []
+        self.judged = []
         self.embedded = []
 
-    async def stream(self, *, model, prompt, system, max_output_tokens):
-        self.calls.append(dict(model=model, prompt=prompt, system=system, max_output_tokens=max_output_tokens))
+    async def stream(self, *, model, prompt, system, max_output_tokens, temperature=None):
+        self.calls.append(dict(model=model, prompt=prompt, system=system, max_output_tokens=max_output_tokens,
+                               temperature=temperature))
         for i, chunk in enumerate(self.chunks):
             if self.fail_after is not None and i == self.fail_after:
                 raise RuntimeError("provider exploded")
             yield TextDelta(chunk)
         if self.usage:
             yield self.usage
+
+    async def complete(self, *, model, prompt, system, max_output_tokens, json_mode=False):
+        self.judged.append(dict(model=model, prompt=prompt, json_mode=json_mode))
+        return Completion(text=self.judge_reply, usage=Usage(20, 8))
 
     async def embed(self, texts, *, model, dimensions):
         self.embedded.append(list(texts))

@@ -47,6 +47,10 @@ public class Job {
     @Column(columnDefinition = "TEXT")
     private String sources;
 
+    // EVAL_RUN: JSON report with summary metrics and per-case scores
+    @Column(columnDefinition = "TEXT")
+    private String report;
+
     // Instant (UTC) so the JSON always carries a timezone ("...Z") and the browser
     // shows the right local time regardless of the server's timezone.
     private Instant createdAt;

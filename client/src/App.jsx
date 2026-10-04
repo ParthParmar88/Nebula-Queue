@@ -3,6 +3,7 @@ import { useAuth } from './context/authContext.js'
 import { matchPath, useLocation } from './lib/router'
 import AuthPage from './pages/AuthPage'
 import DocumentsPage from './pages/DocumentsPage'
+import EvaluationsPage from './pages/EvaluationsPage'
 import JobDetailPage from './pages/JobDetailPage'
 import JobsPage from './pages/JobsPage'
 import NotFoundPage from './pages/NotFoundPage'
@@ -28,6 +29,7 @@ function Routes() {
   if (path === '/') return <OverviewPage />
   if (path === '/jobs') return <JobsPage />
   if (path === '/documents') return <DocumentsPage />
+  if (path === '/evals') return <EvaluationsPage />
 
   const job = matchPath('/jobs/:id', path)
   if (job) return <JobDetailPage key={job.id} id={job.id} />

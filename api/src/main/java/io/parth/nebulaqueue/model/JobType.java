@@ -3,6 +3,8 @@ package io.parth.nebulaqueue.model;
 public enum JobType {
     AI_GENERATE(true, true),
     AI_ASK(true, true),
+    /** Runs a set of test questions through the RAG pipeline and scores the answers. */
+    EVAL_RUN(true, true),
     /** Created by the API when a document is uploaded; not submittable directly. */
     INGEST_DOCUMENT(true, false),
     EMAIL_SEND(false, true),

@@ -32,6 +32,12 @@ class Settings:
     price_embedding_per_1m: float | None = None
     rag_top_k: int = 5
     ask_max_output_tokens: int = 500
+    # ── evaluations ── (empty = use `model`)
+    judge_model: str = ""
+
+    @property
+    def effective_judge_model(self) -> str:
+        return self.judge_model or self.model
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -62,4 +68,5 @@ class Settings:
             price_embedding_per_1m=_optional_float("OPENAI_PRICE_EMBEDDING_PER_1M"),
             rag_top_k=int(os.environ.get("RAG_TOP_K", "5")),
             ask_max_output_tokens=int(os.environ.get("AI_ASK_MAX_OUTPUT_TOKENS", "500")),
+            judge_model=os.environ.get("OPENAI_JUDGE_MODEL", ""),
         )

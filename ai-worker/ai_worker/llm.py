@@ -32,11 +32,29 @@ class Embeddings:
     tokens: int
 
 
+@dataclass(frozen=True)
+class Completion:
+    text: str
+    usage: Usage | None
+
+
 class LLMProvider(Protocol):
     def stream(
-        self, *, model: str, prompt: str, system: str | None, max_output_tokens: int
+        self,
+        *,
+        model: str,
+        prompt: str,
+        system: str | None,
+        max_output_tokens: int,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Yield TextDelta events as text is generated, then a Usage event."""
+        ...
+
+    async def complete(
+        self, *, model: str, prompt: str, system: str, max_output_tokens: int, json_mode: bool = False
+    ) -> Completion:
+        """One non-streaming completion at temperature 0 (used for judging)."""
         ...
 
     async def embed(self, texts: list[str], *, model: str, dimensions: int) -> Embeddings:
@@ -58,20 +76,22 @@ class OpenAIProvider:
         self._client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
 
     async def stream(
-        self, *, model: str, prompt: str, system: str | None, max_output_tokens: int
+        self,
+        *,
+        model: str,
+        prompt: str,
+        system: str | None,
+        max_output_tokens: int,
+        temperature: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-
         stream = await self._client.chat.completions.create(
             model=model,
-            messages=messages,
+            messages=_messages(system, prompt),
             max_completion_tokens=max_output_tokens,
             stream=True,
             # Ask for token usage in the final chunk so we can record cost
             stream_options={"include_usage": True},
+            **({"temperature": temperature} if temperature is not None else {}),
         )
         async for chunk in stream:
             if chunk.choices:
@@ -80,6 +100,22 @@ class OpenAIProvider:
                     yield TextDelta(content)
             if chunk.usage:
                 yield Usage(chunk.usage.prompt_tokens, chunk.usage.completion_tokens)
+
+    async def complete(
+        self, *, model: str, prompt: str, system: str, max_output_tokens: int, json_mode: bool = False
+    ) -> Completion:
+        response = await self._client.chat.completions.create(
+            model=model,
+            messages=_messages(system, prompt),
+            max_completion_tokens=max_output_tokens,
+            temperature=0,
+            **({"response_format": {"type": "json_object"}} if json_mode else {}),
+        )
+        usage = response.usage
+        return Completion(
+            text=response.choices[0].message.content or "",
+            usage=Usage(usage.prompt_tokens, usage.completion_tokens) if usage else None,
+        )
 
     async def embed(self, texts: list[str], *, model: str, dimensions: int) -> Embeddings:
         vectors: list[list[float]] = []
@@ -94,3 +130,9 @@ class OpenAIProvider:
 
     async def aclose(self) -> None:
         await self._client.close()
+
+
+def _messages(system: str | None, prompt: str) -> list[dict]:
+    messages = [{"role": "system", "content": system}] if system else []
+    messages.append({"role": "user", "content": prompt})
+    return messages

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -11,10 +12,11 @@ from decimal import Decimal
 from .api import ApiClient, JobNotRunnable
 from .config import Settings
 from .documents import chunk_pages, extract_pages
+from .evals import CaseResult, citations_valid, judge, retrieval_hit, summarize, summary_line
 from .jobs import parse_generate_payload, run_generate
-from .llm import LLMProvider, TextDelta, Usage
+from .llm import LLMProvider, Usage
 from .pricing import add_costs, cost_usd, embedding_cost_usd
-from .rag import NO_RESULTS_ANSWER, SYSTEM_PROMPT, build_user_prompt, sources_json, to_sources
+from .rag import answer_question, sources_json
 from .streaming import DeltaBatcher
 from .vector_store import VectorStore
 
@@ -60,6 +62,7 @@ class Outcome:
     usage: Usage | None = None
     cost: Decimal | None = None
     sources: str | None = None
+    report: str | None = None
 
 
 class JobRunner:
@@ -80,6 +83,7 @@ class JobRunner:
             "AI_GENERATE": self._generate,
             "INGEST_DOCUMENT": self._ingest,
             "AI_ASK": self._ask,
+            "EVAL_RUN": self._eval,
         }
 
     async def handle(self, body: bytes) -> bool:
@@ -117,6 +121,7 @@ class JobRunner:
                 usage=outcome.usage,
                 cost=outcome.cost,
                 sources=outcome.sources,
+                report=outcome.report,
             )
             log.info(
                 "Job %s (%s) completed: %s tokens in, %s out, cost %s",
@@ -193,49 +198,116 @@ class JobRunner:
         documents = payload.get("documents") or []
         if not isinstance(question, str) or not question.strip() or len(question) > MAX_QUESTION_CHARS:
             raise ValueError("AI_ASK needs a question of at most 2,000 characters")
-        filenames = {d["id"]: d.get("filename", "document") for d in documents if isinstance(d, dict) and "id" in d}
+        filenames = _filenames(documents)
         if not filenames:
             raise ValueError("AI_ASK needs at least one document to search")
 
-        store = self._require_store()
-        query = await self._provider.embed(
-            [question], model=self._settings.embedding_model, dimensions=self._settings.embedding_dimensions
-        )
-        embed_cost = embedding_cost_usd(query.tokens, self._settings.price_embedding_per_1m)
-        hits = await store.search(query.vectors[0], list(filenames), self._settings.rag_top_k)
-
-        if not hits:
-            # Nothing indexed matches — answer without spending a chat call
-            await self._publish_delta(job["id"], job.get("submittedBy"), 0, NO_RESULTS_ANSWER)
-            return Outcome(output=NO_RESULTS_ANSWER, model=self._settings.embedding_model,
-                           usage=Usage(query.tokens, 0), cost=embed_cost, sources="[]")
-
-        sources = to_sources(hits, filenames)
-        model = self._settings.model
         batcher = self._batcher(job)
-        parts: list[str] = []
-        usage: Usage | None = None
-        async for event in self._provider.stream(
-            model=model,
-            prompt=build_user_prompt(question.strip(), sources),
-            system=SYSTEM_PROMPT,
-            max_output_tokens=self._settings.ask_max_output_tokens,
-        ):
-            if isinstance(event, TextDelta):
-                parts.append(event.text)
-                await batcher.add(event.text)
-            elif isinstance(event, Usage):
-                usage = event
+        answer = await answer_question(
+            self._provider,
+            self._require_store(),
+            self._settings,
+            question=question.strip(),
+            filenames=filenames,
+            top_k=self._settings.rag_top_k,
+            on_delta=batcher.add,
+        )
         await batcher.flush()
 
-        chat_cost = cost_usd(usage, self._settings.price_input_per_1m, self._settings.price_output_per_1m)
+        embed_cost = embedding_cost_usd(answer.embedding_tokens, self._settings.price_embedding_per_1m)
+        if answer.usage is None:
+            # no chat call was needed (nothing relevant retrieved): only the embedding was billed
+            return Outcome(output=answer.text, model=self._settings.embedding_model,
+                           usage=Usage(answer.embedding_tokens, 0), cost=embed_cost, sources="[]")
+
+        chat_cost = cost_usd(answer.usage, self._settings.price_input_per_1m, self._settings.price_output_per_1m)
         return Outcome(
-            output="".join(parts),
-            model=model,
-            usage=usage,
+            output=answer.text,
+            model=answer.model,
+            usage=answer.usage,
             # the chat call plus the (tiny) question embedding
             cost=add_costs(chat_cost, embed_cost) if chat_cost is not None else None,
-            sources=sources_json(sources),
+            sources=sources_json(answer.sources),
+        )
+
+    # ── EVAL_RUN ─────────────────────────────────────────────────────────────
+
+    async def _eval(self, job: dict) -> Outcome:
+        payload = _json_object(job.get("payload"))
+        cases = payload.get("cases") or []
+        filenames = _filenames(payload.get("documents") or [])
+        top_k = payload.get("topK", self._settings.rag_top_k)
+        if not cases or not filenames:
+            raise ValueError("EVAL_RUN needs cases and at least one document")
+        if not isinstance(top_k, int) or not 1 <= top_k <= 10:
+            raise ValueError("topK must be between 1 and 10")
+
+        store = self._require_store()
+        judge_model = self._settings.effective_judge_model
+        # Progress goes out on the same live stream as generated text, one line per case
+        batcher = self._batcher(job)
+        await batcher.add(f"Running {len(cases)} case{'s' if len(cases) != 1 else ''} with top-k {top_k}…\n")
+        await batcher.flush()
+
+        results: list[CaseResult] = []
+        chat_usage = Usage(0, 0)
+        judge_usage = Usage(0, 0)
+        embedding_tokens = 0
+
+        for i, case in enumerate(cases, start=1):
+            question, expected = str(case.get("question", "")), str(case.get("expected", ""))
+            started = time.monotonic()
+            # temperature 0: the same documents and settings should give comparable runs
+            answer = await answer_question(
+                self._provider, store, self._settings,
+                question=question, filenames=filenames, top_k=top_k, temperature=0,
+            )
+            latency_ms = round((time.monotonic() - started) * 1000)
+            verdict = await judge(self._provider, judge_model, question, expected, answer.text, answer.sources)
+
+            embedding_tokens += answer.embedding_tokens
+            chat_usage = _add_usage(chat_usage, answer.usage)
+            judge_usage = _add_usage(judge_usage, verdict.usage)
+            result = CaseResult(
+                question=question,
+                expected=expected,
+                answer=answer.text,
+                sources=[
+                    {"n": s.n, "documentId": s.documentId, "filename": s.filename, "page": s.page,
+                     "score": s.score, "text": s.text[:400]}
+                    for s in answer.sources
+                ],
+                correctness=verdict.correctness,
+                faithfulness=verdict.faithfulness,
+                reasoning=verdict.reasoning,
+                retrieval_hit=retrieval_hit(answer.sources, case.get("expectedDocumentId"), case.get("expectedPage")),
+                citations_valid=citations_valid(answer.text, len(answer.sources)),
+                latency_ms=latency_ms,
+            )
+            results.append(result)
+            await batcher.add(_progress_line(i, len(cases), result))
+            await batcher.flush()
+
+        summary = summarize(results)
+        report = {
+            "name": payload.get("name") or "Evaluation",
+            "topK": top_k,
+            "model": self._settings.model,
+            "judgeModel": judge_model,
+            "embeddingModel": self._settings.embedding_model,
+            "documents": [{"id": doc_id, "filename": name} for doc_id, name in filenames.items()],
+            "summary": summary.to_dict(),
+            "cases": [r.to_dict() for r in results],
+        }
+        total = _add_usage(chat_usage, judge_usage)
+        chat_cost = cost_usd(total, self._settings.price_input_per_1m, self._settings.price_output_per_1m)
+        embed_cost = embedding_cost_usd(embedding_tokens, self._settings.price_embedding_per_1m)
+        return Outcome(
+            output=summary_line(summary),
+            model=self._settings.model,
+            usage=total,
+            cost=add_costs(chat_cost, embed_cost) if chat_cost is not None else None,
+            report=json.dumps(report, ensure_ascii=False),
         )
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -256,6 +328,25 @@ class JobRunner:
             await self._publish_event({"jobId": job_id, "owner": owner, "seq": seq, "delta": text})
         except Exception:
             log.warning("Could not publish stream chunk %s for job %s", seq, job_id, exc_info=True)
+
+
+def _filenames(documents: list) -> dict[str, str]:
+    return {d["id"]: d.get("filename", "document") for d in documents if isinstance(d, dict) and "id" in d}
+
+
+def _add_usage(total: Usage, extra: Usage | None) -> Usage:
+    if extra is None:
+        return total
+    return Usage(total.input_tokens + extra.input_tokens, total.output_tokens + extra.output_tokens)
+
+
+def _fmt(score: float | None) -> str:
+    return "–" if score is None else f"{score:.2f}"
+
+
+def _progress_line(i: int, total: int, r: CaseResult) -> str:
+    hit = "" if r.retrieval_hit is None else f" · retrieval {'hit' if r.retrieval_hit else 'miss'}"
+    return f"Case {i}/{total} · correctness {_fmt(r.correctness)} · faithfulness {_fmt(r.faithfulness)}{hit}\n"
 
 
 def _json_object(payload: str | None) -> dict:

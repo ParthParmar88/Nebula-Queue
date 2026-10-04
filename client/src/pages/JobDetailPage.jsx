@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ArrowLeft, ArrowUpRight, FileQuestion, Lock, RefreshCw } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, FileQuestion, Lock, RefreshCw, RotateCcw } from 'lucide-react'
 import { getErrorMessage, getErrorStatus } from '../api/errors'
 import {
   AiOutputCard,
@@ -10,6 +10,7 @@ import {
   UsageCard,
 } from '../components/jobs/AiJobPanels'
 import CancelJobDialog from '../components/jobs/CancelJobDialog'
+import { EvalCasesCard, EvalConfigCard, EvalProgressCard, EvalSummary } from '../components/jobs/EvalReport'
 import JobTimeline from '../components/jobs/JobTimeline'
 import JobTypeIcon from '../components/jobs/JobTypeIcon'
 import Alert from '../components/ui/Alert'
@@ -21,11 +22,21 @@ import PageHeader from '../components/ui/PageHeader'
 import Skeleton from '../components/ui/Skeleton'
 import StatusBadge from '../components/ui/StatusBadge'
 import { buttonVariants } from '../components/ui/variants'
+import { useShell } from '../context/shellContext.js'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useJobQuery } from '../hooks/useJobs'
 import { useNow } from '../hooks/useNow'
 import { formatDateTime, formatDuration, formatRelative, isHttpUrl, prettyJson, shortId } from '../lib/format'
-import { isAiJob, isStreamingJob, jobTypeMeta, parseSources, STATUS_LABELS } from '../lib/jobTypes'
+import {
+  evalConfigFromPayload,
+  isAiJob,
+  isFinished,
+  isStreamingJob,
+  jobTypeMeta,
+  parseReport,
+  parseSources,
+  STATUS_LABELS,
+} from '../lib/jobTypes'
 
 export default function JobDetailPage({ id }) {
   const { data: job, isPending, isError, error, refetch, isFetching } = useJobQuery(id)
@@ -34,6 +45,8 @@ export default function JobDetailPage({ id }) {
   const ai = isAiJob(job)
   const hasResponse = job && job.status !== 'CANCELLED' && job.status !== 'FAILED'
   const sources = useMemo(() => parseSources(job?.sources), [job?.sources])
+  const report = useMemo(() => parseReport(job?.report), [job?.report])
+  const { openNewJob } = useShell()
   useDocumentTitle(meta ? `${meta.label} ${shortId(id)}` : `Job ${shortId(id)}`)
 
   const breadcrumbs = [{ label: 'Jobs', to: '/jobs' }, { label: shortId(id) }]
@@ -93,10 +106,19 @@ export default function JobDetailPage({ id }) {
           </span>
         }
         actions={
-          job.status === 'PENDING' && (
+          job.status === 'PENDING' ? (
             <Button variant="secondary" onClick={() => setCancelOpen(true)} className="text-danger hover:text-danger">
               Cancel job
             </Button>
+          ) : (
+            job.type === 'EVAL_RUN' &&
+            isFinished(job.status) && (
+              // Opens the editor pre-filled, so you can change top-k (or a case) and compare
+              <Button onClick={() => openNewJob({ type: 'EVAL_RUN', evalConfig: evalConfigFromPayload(job.payload) })}>
+                <RotateCcw aria-hidden="true" />
+                Re-run
+              </Button>
+            )
           )
         }
       >
@@ -109,7 +131,16 @@ export default function JobDetailPage({ id }) {
         <div className="grid items-start gap-6 lg:grid-cols-3">
           <div className="flex min-w-0 flex-col gap-6 lg:col-span-2">
             {/* failed/cancelled jobs have no response; the status banner explains why */}
-            {job.type === 'AI_ASK' ? (
+            {job.type === 'EVAL_RUN' ? (
+              report ? (
+                <>
+                  <EvalSummary report={report} />
+                  <EvalCasesCard report={report} />
+                </>
+              ) : (
+                hasResponse && <EvalProgressCard job={job} />
+              )
+            ) : job.type === 'AI_ASK' ? (
               <>
                 {hasResponse && <AiOutputCard job={job} sources={sources} />}
                 <QuestionCard payload={job.payload} />
@@ -131,6 +162,7 @@ export default function JobDetailPage({ id }) {
           </div>
           <div className="flex flex-col gap-6">
             {ai && <UsageCard job={job} />}
+            {report && <EvalConfigCard report={report} />}
             <Card>
               <CardHeader title="Lifecycle" />
               <div className="px-5 py-4">

@@ -65,6 +65,22 @@ export function formatCost(usd) {
   return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`
 }
 
+/** 0.873 → "0.87"; null → "–" (not scored). */
+export function formatScore(score) {
+  return score == null ? '–' : Number(score).toFixed(2)
+}
+
+/** 0.873 → "87%"; null → "–". */
+export function formatRate(rate) {
+  return rate == null ? '–' : `${Math.round(Number(rate) * 100)}%`
+}
+
+/** Badge tone for a 0–1 score: green ≥ 0.8, amber ≥ 0.5, red below, neutral when unscored. */
+export function scoreTone(score) {
+  if (score == null) return 'neutral'
+  return score >= 0.8 ? 'success' : score >= 0.5 ? 'warning' : 'danger'
+}
+
 export function shortId(id) {
   return id ? id.slice(0, 8) : ''
 }

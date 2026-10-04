@@ -38,6 +38,37 @@ class JobPayloadValidatorTest {
     }
 
     @Test
+    void evalNeedsCasesWithQuestionAndExpectedAnswer() {
+        for (String payload : new String[] {
+                "{}",
+                "{\"cases\": []}",
+                "{\"cases\": [{\"question\": \"Q\"}]}",
+                "{\"cases\": [{\"expected\": \"A\"}]}",
+                "{\"topK\": 0, \"cases\": [{\"question\": \"Q\", \"expected\": \"A\"}]}",
+                "{\"topK\": 11, \"cases\": [{\"question\": \"Q\", \"expected\": \"A\"}]}",
+                "{\"cases\": [{\"question\": \"Q\", \"expected\": \"A\", \"expectedPage\": 0}]}" }) {
+            assertThatThrownBy(() -> validator.validate(JobType.EVAL_RUN, payload))
+                    .as("payload %s", payload)
+                    .isInstanceOf(InvalidJobRequestException.class);
+        }
+    }
+
+    @Test
+    void evalCasesAreCapped() {
+        String cases = String.join(",", java.util.Collections.nCopies(
+                JobPayloadValidator.MAX_EVAL_CASES + 1, "{\"question\": \"Q\", \"expected\": \"A\"}"));
+        assertThatThrownBy(() -> validator.validate(JobType.EVAL_RUN, "{\"cases\": [" + cases + "]}"))
+                .isInstanceOf(InvalidJobRequestException.class);
+    }
+
+    @Test
+    void acceptsAValidEval() {
+        assertThatCode(() -> validator.validate(JobType.EVAL_RUN,
+                "{\"name\": \"Baseline\", \"topK\": 3, \"cases\": [{\"question\": \"Q\", \"expected\": \"A\", \"expectedPage\": 1}]}"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void otherJobTypesAreNotValidatedHere() {
         assertThatCode(() -> validator.validate(JobType.BATCH, null)).doesNotThrowAnyException();
     }
