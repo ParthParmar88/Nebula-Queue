@@ -23,8 +23,9 @@ import Skeleton from '../components/ui/Skeleton'
 import StatusBadge from '../components/ui/StatusBadge'
 import { buttonVariants } from '../components/ui/variants'
 import { useShell } from '../context/shellContext.js'
+import { useToast } from '../context/toastContext.js'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { useJobQuery } from '../hooks/useJobs'
+import { useJobQuery, useRetryJob } from '../hooks/useJobs'
 import { useNow } from '../hooks/useNow'
 import { formatDateTime, formatDuration, formatRelative, isHttpUrl, prettyJson, shortId } from '../lib/format'
 import {
@@ -37,6 +38,7 @@ import {
   parseSources,
   STATUS_LABELS,
 } from '../lib/jobTypes'
+import { navigate } from '../lib/router'
 
 export default function JobDetailPage({ id }) {
   const { data: job, isPending, isError, error, refetch, isFetching } = useJobQuery(id)
@@ -110,15 +112,14 @@ export default function JobDetailPage({ id }) {
             <Button variant="secondary" onClick={() => setCancelOpen(true)} className="text-danger hover:text-danger">
               Cancel job
             </Button>
+          ) : job.type === 'EVAL_RUN' && isFinished(job.status) ? (
+            // Opens the editor pre-filled, so you can change top-k (or a case) and compare
+            <Button onClick={() => openNewJob({ type: 'EVAL_RUN', evalConfig: evalConfigFromPayload(job.payload) })}>
+              <RotateCcw aria-hidden="true" />
+              Re-run
+            </Button>
           ) : (
-            job.type === 'EVAL_RUN' &&
-            isFinished(job.status) && (
-              // Opens the editor pre-filled, so you can change top-k (or a case) and compare
-              <Button onClick={() => openNewJob({ type: 'EVAL_RUN', evalConfig: evalConfigFromPayload(job.payload) })}>
-                <RotateCcw aria-hidden="true" />
-                Re-run
-              </Button>
-            )
+            (job.status === 'FAILED' || job.status === 'CANCELLED') && <RetryButton job={job} />
           )
         }
       >
@@ -191,14 +192,63 @@ function JobMeta({ job }) {
       <span>
         Submitted <time dateTime={job.createdAt} title={formatDateTime(job.createdAt)}>{formatRelative(job.createdAt, now)}</time>
       </span>
+      {job.retryOfJobId && (
+        <span>
+          Retry of{' '}
+          <a href={`#/jobs/${job.retryOfJobId}`} className="font-mono text-xs text-fg hover:underline">
+            {shortId(job.retryOfJobId)}
+          </a>
+        </span>
+      )}
     </div>
   )
 }
 
+/** Runs a failed or cancelled job again as a new job, then opens it. */
+function RetryButton({ job }) {
+  const { toast } = useToast()
+  const retry = useRetryJob()
+  return (
+    <Button
+      loading={retry.isPending}
+      onClick={() =>
+        retry.mutate(job.id, {
+          onSuccess: (newJob) => {
+            toast({ title: 'Job queued again', description: `Retrying as ${shortId(newJob.id)}.` })
+            navigate(`/jobs/${newJob.id}`)
+          },
+          onError: (err) => toast({ tone: 'danger', title: 'Couldn’t retry the job', description: getErrorMessage(err) }),
+        })
+      }
+    >
+      {!retry.isPending && <RotateCcw aria-hidden="true" />}
+      Retry
+    </Button>
+  )
+}
+
+/** "in a few seconds", "in 2 minutes", or "any moment now" once it's due. */
+function nextAttemptLabel(iso, now) {
+  const ms = new Date(iso).getTime() - now
+  if (ms <= 0) return 'any moment now'
+  return ms < 45_000 ? 'in a few seconds' : formatRelative(iso, now)
+}
+
 function StatusBanner({ job }) {
+  const now = useNow()
   switch (job.status) {
     case 'PENDING':
-      return (
+      // After a temporary failure the worker puts the job back to PENDING until it retries
+      return job.lastError && job.nextRetryAt ? (
+        <Alert tone="warning" title={`Retrying automatically — attempt ${job.attempts ?? 1} failed`}>
+          <span className="break-words">{job.lastError}</span>{' '}
+          Next attempt{' '}
+          <time dateTime={job.nextRetryAt} title={formatDateTime(job.nextRetryAt)}>
+            {nextAttemptLabel(job.nextRetryAt, now)}
+          </time>
+          .
+        </Alert>
+      ) : (
         <Alert tone="warning" title="Waiting in the queue">
           A worker will pick this job up as soon as one is free. This page updates on its own.
         </Alert>
@@ -281,6 +331,7 @@ function DetailsCard({ job }) {
     ['Finished', job.completedAt ? formatDateTime(job.completedAt) : '—'],
     // includes time spent waiting in the queue
     ['Total time', totalMs != null ? formatDuration(totalMs) : '—'],
+    ['Attempts', job.attempts ? String(job.attempts) : '—'],
   ]
 
   return (

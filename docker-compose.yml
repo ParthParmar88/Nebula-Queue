@@ -26,7 +26,6 @@ services:
 
   worker:
     build: ./workers
-    container_name: nq-worker
     restart: on-failure
     depends_on:
       - postgres
@@ -50,10 +49,10 @@ services:
       EMAIL_PASS: ${EMAIL_PASS:-}
 
   # Python worker for AI jobs (consumes ai-job-queue, streams tokens back via job-events).
+  # No container_name, so it can be scaled: docker compose up -d --scale ai-worker=3
   # Owns the pgvector index (document_chunks) for document Q&A.
   ai-worker:
     build: ./ai-worker
-    container_name: nq-ai-worker
     restart: on-failure
     depends_on:
       - postgres

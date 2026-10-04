@@ -68,4 +68,11 @@ public class JobController {
     public ResponseEntity<Job> cancelJob(@PathVariable String id) {
         return ResponseEntity.ok(jobService.cancelJob(id));
     }
+
+    /** Run a failed or cancelled job again; returns the new job (linked via retryOfJobId). */
+    @PostMapping("/{id}/retry")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<Job> retryJob(@PathVariable String id) {
+        return ResponseEntity.ok(jobService.retryJob(id));
+    }
 }

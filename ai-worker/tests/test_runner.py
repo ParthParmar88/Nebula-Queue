@@ -58,7 +58,7 @@ def test_invalid_payload_fails_job_with_a_clear_reason():
     api, provider = FakeApi(), FakeProvider()
     runner = JobRunner(settings(), api, provider, Recorder())
 
-    assert run(runner, message(payload=json.dumps({"prompt": ""}))) is False
+    assert run(runner, message(payload=json.dumps({"prompt": ""}))) is True  # acked: failed for good
 
     status, result = api.finished[0][1]["status"], api.finished[0][1]["result"]
     assert status == "FAILED"
@@ -70,7 +70,7 @@ def test_provider_error_marks_job_failed():
     api = FakeApi()
     runner = JobRunner(settings(), api, FakeProvider(fail_after=1), Recorder())
 
-    assert run(runner, message()) is False
+    assert run(runner, message()) is True  # acked: failed for good, not redelivered
     assert api.finished[0][1]["status"] == "FAILED"
     assert "provider exploded" in api.finished[0][1]["result"]
 
@@ -79,7 +79,7 @@ def test_missing_api_key_fails_job_instead_of_crashing():
     api = FakeApi()
     runner = JobRunner(settings(openai_api_key=""), api, None, Recorder())
 
-    assert run(runner, message()) is False
+    assert run(runner, message()) is True  # acked: failed for good, not redelivered
     assert "OPENAI_API_KEY" in api.finished[0][1]["result"]
 
 
@@ -98,5 +98,5 @@ def test_malformed_message_is_dropped():
     api = FakeApi()
     runner = JobRunner(settings(), api, FakeProvider(), Recorder())
 
-    assert run(runner, b"not json") is False
+    assert run(runner, b"not json") is True  # acked after dead-lettering
     assert api.started == []

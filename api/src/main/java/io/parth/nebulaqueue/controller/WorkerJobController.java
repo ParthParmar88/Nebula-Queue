@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.parth.nebulaqueue.dto.WorkerResultRequest;
+import io.parth.nebulaqueue.dto.WorkerRetryRequest;
 import io.parth.nebulaqueue.model.Job;
 import io.parth.nebulaqueue.model.JobStatus;
 import io.parth.nebulaqueue.service.JobService;
@@ -42,5 +43,22 @@ public class WorkerJobController {
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Job> finish(@PathVariable String id, @Valid @RequestBody WorkerResultRequest result) {
         return ResponseEntity.ok(jobService.finishJob(id, result));
+    }
+
+    /**
+     * Take the job (→ PROCESSING). {@code redelivered=true} lets a worker take over a job
+     * whose previous worker died mid-run. 409 if the job is finished or cancelled.
+     */
+    @PostMapping("/{id}/claim")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Job> claim(@PathVariable String id, @RequestParam(defaultValue = "false") boolean redelivered) {
+        return ResponseEntity.ok(jobService.claim(id, redelivered));
+    }
+
+    /** Temporary failure: the job goes back to PENDING until the worker retries it. */
+    @PostMapping("/{id}/retry-scheduled")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Job> retryScheduled(@PathVariable String id, @Valid @RequestBody WorkerRetryRequest retry) {
+        return ResponseEntity.ok(jobService.scheduleRetry(id, retry));
     }
 }

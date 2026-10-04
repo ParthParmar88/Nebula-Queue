@@ -18,13 +18,25 @@ class ApiClient:
         self._client = client or httpx.AsyncClient(base_url=base_url, timeout=30.0)
         self._headers = {"X-Worker-Token": token}
 
-    async def start(self, job_id: str) -> None:
-        """Claim the job (PENDING → PROCESSING)."""
-        response = await self._client.patch(
-            f"/internal/worker/jobs/{job_id}/status", params={"status": "PROCESSING"}, headers=self._headers
+    async def claim(self, job_id: str, *, take_over: bool = False) -> None:
+        """Take the job (→ PROCESSING). `take_over` lets this worker resume a job whose
+        previous worker died mid-run; the API still refuses finished or cancelled jobs."""
+        response = await self._client.post(
+            f"/internal/worker/jobs/{job_id}/claim",
+            params={"redelivered": str(take_over).lower()},
+            headers=self._headers,
         )
         if response.status_code in (404, 409):
             raise JobNotRunnable(f"HTTP {response.status_code}")
+        response.raise_for_status()
+
+    async def schedule_retry(self, job_id: str, *, error: str, delay_seconds: int) -> None:
+        """Tell the API the job hit a temporary error and will be retried (→ PENDING)."""
+        response = await self._client.post(
+            f"/internal/worker/jobs/{job_id}/retry-scheduled",
+            json={"error": error[:2000], "delaySeconds": delay_seconds},
+            headers=self._headers,
+        )
         response.raise_for_status()
 
     async def finish(

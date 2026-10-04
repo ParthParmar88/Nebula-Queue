@@ -51,6 +51,21 @@ public class Job {
     @Column(columnDefinition = "TEXT")
     private String report;
 
+    // ── reliability ──────────────────────────────────────────────────────
+    // Nullable so ddl-auto can add the columns to tables that already have rows
+    private Integer attempts;      // times a worker has started this job
+
+    @Column(columnDefinition = "TEXT")
+    private String lastError;      // most recent temporary failure, while retrying
+
+    private Instant nextRetryAt;   // when the worker will try again (PENDING after a failure)
+
+    private String retryOfJobId;   // set when a user re-ran a failed or cancelled job
+
+    public int getAttemptCount() {
+        return attempts == null ? 0 : attempts;
+    }
+
     // Instant (UTC) so the JSON always carries a timezone ("...Z") and the browser
     // shows the right local time regardless of the server's timezone.
     private Instant createdAt;

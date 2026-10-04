@@ -1,6 +1,7 @@
 import { ArrowRight, Plus, RefreshCw } from 'lucide-react'
 import { getErrorMessage } from '../api/errors'
 import JobTypeIcon from '../components/jobs/JobTypeIcon'
+import QueuesCard from '../components/jobs/QueuesCard'
 import Alert from '../components/ui/Alert'
 import Button from '../components/ui/Button'
 import { Card, CardHeader } from '../components/ui/Card'
@@ -65,6 +66,7 @@ export default function OverviewPage() {
               <JobTypeBreakdown jobs={jobs} />
             </div>
           </div>
+          {isAdmin && <QueuesCard />}
         </div>
       )}
     </>

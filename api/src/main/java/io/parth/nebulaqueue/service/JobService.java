@@ -1,5 +1,6 @@
 package io.parth.nebulaqueue.service;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -20,6 +21,7 @@ import io.parth.nebulaqueue.dto.EvalJobPayload;
 import io.parth.nebulaqueue.dto.IngestJobPayload;
 import io.parth.nebulaqueue.dto.SubmitJobRequest;
 import io.parth.nebulaqueue.dto.WorkerResultRequest;
+import io.parth.nebulaqueue.dto.WorkerRetryRequest;
 import io.parth.nebulaqueue.exception.InvalidJobRequestException;
 import io.parth.nebulaqueue.exception.InvalidJobStateException;
 import io.parth.nebulaqueue.exception.JobNotFoundException;
@@ -33,9 +35,11 @@ import io.parth.nebulaqueue.producer.JobProducer;
 import io.parth.nebulaqueue.repository.DocumentRepository;
 import io.parth.nebulaqueue.repository.JobRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class JobService {
 
     private static final List<JobType> METERED_TYPES = Arrays.stream(JobType.values()).filter(JobType::isMetered).toList();
@@ -58,36 +62,68 @@ public class JobService {
         }
         payloadValidator.validate(request.type(), request.payload());
         String currentUser = getCurrentUsername();
-
-        if (request.type().isMetered()) {
-            long active = jobRepository.countBySubmittedByAndTypeInAndStatusIn(currentUser, METERED_TYPES, ACTIVE_STATUSES);
-            if (active >= maxActiveAiJobsPerUser) {
-                throw new UsageLimitException("You already have " + active
-                        + " AI jobs queued or running. Wait for one to finish before starting another.");
-            }
-        }
+        checkAiQuota(request.type(), currentUser);
 
         String payload = switch (request.type()) {
             case AI_ASK -> resolveAskPayload(currentUser, payloadValidator.parseAsk(request.payload()));
             case EVAL_RUN -> resolveEvalPayload(currentUser, payloadValidator.parseEval(request.payload()));
             default -> request.payload();
         };
-        return queue(request.type(), payload, currentUser);
+        return queue(request.type(), payload, currentUser, null);
     }
 
     /** Queue the indexing job for a freshly uploaded document (called by DocumentService). */
     public Job queueIngest(Document document) {
         String payload = payloadValidator.toJson(
                 new IngestJobPayload(document.getId(), document.getFilename(), document.getContentType()));
-        return queue(JobType.INGEST_DOCUMENT, payload, document.getOwner());
+        return queue(JobType.INGEST_DOCUMENT, payload, document.getOwner(), null);
     }
 
-    private Job queue(JobType type, String payload, String owner) {
+    /**
+     * Run a failed or cancelled job again, as a new job linked to the old one (the failed
+     * attempt stays in the history). Re-uses the stored payload, which for AI_ASK/EVAL_RUN
+     * is already pinned to concrete documents.
+     */
+    public Job retryJob(String id) {
+        Job old = getJobById(id);
+        if (old.getStatus() != JobStatus.FAILED && old.getStatus() != JobStatus.CANCELLED) {
+            throw new InvalidJobStateException("Only failed or cancelled jobs can be run again");
+        }
+        checkAiQuota(old.getType(), old.getSubmittedBy());
+
+        if (old.getType() != JobType.INGEST_DOCUMENT) {
+            return queue(old.getType(), old.getPayload(), old.getSubmittedBy(), old.getId());
+        }
+        // Re-indexing: the document goes back to PROCESSING and points at the new job
+        Document document = documentRepository.findByIngestJobId(old.getId())
+                .orElseThrow(() -> new InvalidJobStateException("The document for this job was deleted"));
+        document.setStatus(DocumentStatus.PROCESSING);
+        document.setError(null);
+        documentRepository.save(document);
+        Job job = queue(JobType.INGEST_DOCUMENT, old.getPayload(), old.getSubmittedBy(), old.getId());
+        document.setIngestJobId(job.getId());
+        documentRepository.save(document);
+        return job;
+    }
+
+    private void checkAiQuota(JobType type, String user) {
+        if (!type.isMetered()) {
+            return;
+        }
+        long active = jobRepository.countBySubmittedByAndTypeInAndStatusIn(user, METERED_TYPES, ACTIVE_STATUSES);
+        if (active >= maxActiveAiJobsPerUser) {
+            throw new UsageLimitException("You already have " + active
+                    + " AI jobs queued or running. Wait for one to finish before starting another.");
+        }
+    }
+
+    private Job queue(JobType type, String payload, String owner, String retryOfJobId) {
         Job job = new Job();
         job.setType(type);
         job.setPayload(payload);
         job.setStatus(JobStatus.PENDING);
         job.setSubmittedBy(owner);
+        job.setRetryOfJobId(retryOfJobId);
 
         Job savedJob = jobRepository.save(job);
         jobProducer.sendJob(savedJob);
@@ -147,10 +183,56 @@ public class JobService {
     public Job updateJobStatus(String id, JobStatus status, String resultUrl) {
         Job job = getJobById(id);
         transition(job, status);
+        if (status == JobStatus.PROCESSING) {
+            markStarted(job);
+        }
         if (resultUrl != null) {
             job.setResultUrl(resultUrl);
         }
         return saveAndPublish(job);
+    }
+
+    /**
+     * A worker takes the job. Normally PENDING → PROCESSING. When RabbitMQ redelivers a
+     * message because the worker holding it died, the job is already PROCESSING; the new
+     * worker may take it over. Finished or cancelled jobs are refused (409), which is what
+     * makes at-least-once delivery safe: a job never completes twice.
+     */
+    public Job claim(String id, boolean redelivered) {
+        Job job = getJobById(id);
+        boolean takeOver = redelivered && job.getStatus() == JobStatus.PROCESSING;
+        if (job.getStatus() != JobStatus.PENDING && !takeOver) {
+            throw new InvalidJobStateException("Job can't be started (status " + job.getStatus() + ")");
+        }
+        job.setStatus(JobStatus.PROCESSING);
+        markStarted(job);
+        return saveAndPublish(job);
+    }
+
+    /** The worker hit a temporary error and will retry: back to PENDING until it does. */
+    public Job scheduleRetry(String id, WorkerRetryRequest retry) {
+        Job job = getJobById(id);
+        if (job.getStatus() != JobStatus.PROCESSING) {
+            throw new InvalidJobStateException("Only a running job can be scheduled for retry");
+        }
+        job.setStatus(JobStatus.PENDING);
+        job.setLastError(retry.error());
+        job.setNextRetryAt(Instant.now().plusSeconds(retry.delaySeconds()));
+        return saveAndPublish(job);
+    }
+
+    /**
+     * Fail jobs that have been PROCESSING with no update for longer than {@code stuckAfter}
+     * — their worker most likely died. Runs from a scheduler, so there's no user context.
+     */
+    public int failStuckJobs(Duration stuckAfter) {
+        List<Job> stuck = jobRepository.findByStatusAndUpdatedAtBefore(JobStatus.PROCESSING, Instant.now().minus(stuckAfter));
+        String message = "Error: The worker stopped responding (no progress for " + stuckAfter.toMinutes() + " minutes).";
+        for (Job job : stuck) {
+            applyFinish(job, new WorkerResultRequest(JobStatus.FAILED, message, null, null, null, null, null, null, null));
+            log.warn("Marked stuck job {} ({}) as FAILED", job.getId(), job.getType());
+        }
+        return stuck.size();
     }
 
     // Final result from a worker, including AI output and token usage
@@ -158,8 +240,12 @@ public class JobService {
         if (result.status() != JobStatus.COMPLETED && result.status() != JobStatus.FAILED) {
             throw new InvalidJobRequestException("A job can only finish as COMPLETED or FAILED");
         }
-        Job job = getJobById(id);
+        return applyFinish(getJobById(id), result);
+    }
+
+    private Job applyFinish(Job job, WorkerResultRequest result) {
         transition(job, result.status());
+        job.setNextRetryAt(null);
         if (result.resultUrl() != null) job.setResultUrl(result.resultUrl());
         if (result.output() != null) job.setOutput(result.output());
         if (result.model() != null) job.setModel(result.model());
@@ -227,6 +313,11 @@ public class JobService {
         if (status == JobStatus.COMPLETED || status == JobStatus.FAILED) {
             job.setCompletedAt(Instant.now());
         }
+    }
+
+    private static void markStarted(Job job) {
+        job.setAttempts(job.getAttemptCount() + 1);
+        job.setNextRetryAt(null);
     }
 
     private Job saveAndPublish(Job job) {

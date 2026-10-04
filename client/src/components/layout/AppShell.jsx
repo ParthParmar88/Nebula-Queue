@@ -40,6 +40,10 @@ export default function AppShell({ children }) {
         clearStream(job.id)
         // An indexing job finishing means a document became ready (or failed)
         if (job.type === 'INGEST_DOCUMENT') refreshDocuments()
+      } else if (job.status === 'PENDING') {
+        // Back in the queue for a retry: drop the failed attempt's partial text. The next
+        // attempt restarts its chunk numbering at 0, which would otherwise look like duplicates.
+        clearStream(job.id)
       }
     },
     [applyJobUpdate, refreshDocuments]

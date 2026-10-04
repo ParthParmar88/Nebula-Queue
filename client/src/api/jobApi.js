@@ -10,3 +10,8 @@ export const getAllJobs = () => http.get('/api/jobs')
 export const getJob = (id) => http.get(`/api/jobs/${encodeURIComponent(id)}`)
 
 export const cancelJob = (id) => http.post(`/api/jobs/${encodeURIComponent(id)}/cancel`)
+
+export const retryJob = (id) => http.post(`/api/jobs/${encodeURIComponent(id)}/retry`)
+
+/** Admin: depth and consumers of every RabbitMQ queue. */
+export const getQueueStats = () => http.get('/api/admin/queues')

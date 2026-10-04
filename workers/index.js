@@ -7,6 +7,10 @@ const axios = require('axios');
 const { handleEmailSend } = require('./handlers/emailHandler');
 
 const API_URL = process.env.API_URL || 'http://localhost:9090';
+
+const DEAD_LETTER_EXCHANGE = 'job-dlx';
+const DEAD_LETTER_QUEUE = 'job-dlq';
+const DEAD_LETTER_ROUTING_KEY = 'job.dead';
 const WORKER_TOKEN = process.env.WORKER_INTERNAL_TOKEN;
 
 const db = new Pool({
@@ -98,6 +102,21 @@ async function startWorker() {
   await channel.assertQueue('job-queue', { durable: true });
   channel.prefetch(1);
 
+  // Failed messages are parked in job-dlq (with the reason) instead of being dropped,
+  // so they can be inspected or replayed. The same job-dlx exchange is used by the AI worker.
+  await channel.assertExchange(DEAD_LETTER_EXCHANGE, 'direct', { durable: true });
+  await channel.assertQueue(DEAD_LETTER_QUEUE, { durable: true });
+  await channel.bindQueue(DEAD_LETTER_QUEUE, DEAD_LETTER_EXCHANGE, DEAD_LETTER_ROUTING_KEY);
+
+  function deadLetter(msg, reason) {
+    channel.publish(DEAD_LETTER_EXCHANGE, DEAD_LETTER_ROUTING_KEY, msg.content, {
+      persistent: true,
+      contentType: 'application/json',
+      headers: { 'x-error': String(reason).slice(0, 500), 'x-attempts': 1 },
+    });
+    channel.ack(msg);
+  }
+
   console.log('Worker listening on job-queue...');
 
   channel.consume('job-queue', async (msg) => {
@@ -108,13 +127,13 @@ async function startWorker() {
     try {
       job = JSON.parse(msg.content.toString());
     } catch {
-      console.error('Dropping malformed message (not JSON)');
-      channel.nack(msg, false, false);
+      console.error('Dead-lettering malformed message (not JSON)');
+      deadLetter(msg, 'Malformed message');
       return;
     }
     if (!job?.id) {
-      console.error('Dropping message without a job id');
-      channel.nack(msg, false, false);
+      console.error('Dead-lettering message without a job id');
+      deadLetter(msg, 'Message has no job id');
       return;
     }
 
@@ -149,7 +168,7 @@ async function startWorker() {
         console.error('Failed to mark job FAILED:', dbErr);
       }
 
-      channel.nack(msg, false, false);
+      deadLetter(msg, reason);
     }
   });
 

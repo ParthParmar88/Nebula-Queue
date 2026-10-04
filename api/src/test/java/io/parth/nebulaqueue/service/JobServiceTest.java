@@ -11,6 +11,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -25,6 +27,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import io.parth.nebulaqueue.config.JobStatusPublisher;
 import io.parth.nebulaqueue.dto.SubmitJobRequest;
 import io.parth.nebulaqueue.dto.WorkerResultRequest;
+import io.parth.nebulaqueue.dto.WorkerRetryRequest;
 import io.parth.nebulaqueue.exception.InvalidJobRequestException;
 import io.parth.nebulaqueue.exception.InvalidJobStateException;
 import io.parth.nebulaqueue.exception.JobNotFoundException;
@@ -93,6 +96,106 @@ class JobServiceTest {
                 .isInstanceOf(InvalidJobRequestException.class)
                 .hasMessageContaining("don't exist");
         verify(jobProducer, never()).sendJob(any());
+    }
+
+    // ── reliability ──────────────────────────────────────────────────────────
+
+    @Test
+    void claimStartsAPendingJobAndCountsTheAttempt() {
+        signIn("worker", "ROLE_ADMIN");
+        Job pending = job("j1", "alice@example.com", JobStatus.PENDING);
+        pending.setNextRetryAt(Instant.now());
+        when(jobRepository.findById("j1")).thenReturn(Optional.of(pending));
+
+        Job claimed = jobService.claim("j1", false);
+
+        assertThat(claimed.getStatus()).isEqualTo(JobStatus.PROCESSING);
+        assertThat(claimed.getAttemptCount()).isEqualTo(1);
+        assertThat(claimed.getNextRetryAt()).isNull();
+    }
+
+    @Test
+    void aRedeliveredMessageMayTakeOverARunningJobButNotAFinishedOne() {
+        signIn("worker", "ROLE_ADMIN");
+        Job running = job("j1", "alice@example.com", JobStatus.PROCESSING);
+        running.setAttempts(1);
+        when(jobRepository.findById("j1")).thenReturn(Optional.of(running));
+        when(jobRepository.findById("j2")).thenReturn(Optional.of(job("j2", "alice@example.com", JobStatus.COMPLETED)));
+
+        // a fresh delivery can't double-run a job that's already going
+        assertThatThrownBy(() -> jobService.claim("j1", false)).isInstanceOf(InvalidJobStateException.class);
+        // a redelivery (previous worker died) can take it over
+        assertThat(jobService.claim("j1", true).getAttemptCount()).isEqualTo(2);
+        // but a finished job is never run again — this keeps at-least-once delivery safe
+        assertThatThrownBy(() -> jobService.claim("j2", true)).isInstanceOf(InvalidJobStateException.class);
+    }
+
+    @Test
+    void scheduledRetryPutsTheJobBackToPendingWithTheError() {
+        signIn("worker", "ROLE_ADMIN");
+        when(jobRepository.findById("j1")).thenReturn(Optional.of(job("j1", "alice@example.com", JobStatus.PROCESSING)));
+
+        Job waiting = jobService.scheduleRetry("j1", new WorkerRetryRequest("Rate limited", 30));
+
+        assertThat(waiting.getStatus()).isEqualTo(JobStatus.PENDING);
+        assertThat(waiting.getLastError()).isEqualTo("Rate limited");
+        assertThat(waiting.getNextRetryAt()).isAfter(Instant.now().plusSeconds(25));
+        verify(publisher).publish(waiting);
+    }
+
+    @Test
+    void retryQueuesANewJobLinkedToTheFailedOne() {
+        signIn("alice@example.com", "ROLE_USER");
+        Job failed = job("j1", "alice@example.com", JobStatus.FAILED);
+        failed.setPayload("{\"x\":1}");
+        when(jobRepository.findById("j1")).thenReturn(Optional.of(failed));
+
+        Job again = jobService.retryJob("j1");
+
+        assertThat(again.getStatus()).isEqualTo(JobStatus.PENDING);
+        assertThat(again.getPayload()).isEqualTo("{\"x\":1}");
+        assertThat(again.getRetryOfJobId()).isEqualTo("j1");
+        verify(jobProducer).sendJob(again);
+    }
+
+    @Test
+    void retryOfAFailedIndexingJobReindexesTheDocument() {
+        signIn("alice@example.com", "ROLE_USER");
+        Job failed = job("j1", "alice@example.com", JobStatus.FAILED);
+        failed.setType(JobType.INGEST_DOCUMENT);
+        Document doc = document("d1", "alice@example.com", DocumentStatus.FAILED);
+        doc.setError("Error: boom");
+        when(jobRepository.findById("j1")).thenReturn(Optional.of(failed));
+        when(documentRepository.findByIngestJobId("j1")).thenReturn(Optional.of(doc));
+
+        Job again = jobService.retryJob("j1");
+
+        assertThat(doc.getStatus()).isEqualTo(DocumentStatus.PROCESSING);
+        assertThat(doc.getError()).isNull();
+        assertThat(doc.getIngestJobId()).isEqualTo(again.getId());
+    }
+
+    @Test
+    void onlyFailedOrCancelledJobsCanBeRetried() {
+        signIn("alice@example.com", "ROLE_USER");
+        when(jobRepository.findById("j1")).thenReturn(Optional.of(job("j1", "alice@example.com", JobStatus.COMPLETED)));
+
+        assertThatThrownBy(() -> jobService.retryJob("j1")).isInstanceOf(InvalidJobStateException.class);
+    }
+
+    @Test
+    void stuckJobsAreFailedWithoutAUserContext() {
+        // the reaper runs from a scheduler: no SecurityContext at all
+        Job stuck = job("j1", "alice@example.com", JobStatus.PROCESSING);
+        when(jobRepository.findByStatusAndUpdatedAtBefore(eq(JobStatus.PROCESSING), any(Instant.class)))
+                .thenReturn(List.of(stuck));
+
+        int failed = jobService.failStuckJobs(Duration.ofMinutes(10));
+
+        assertThat(failed).isEqualTo(1);
+        assertThat(stuck.getStatus()).isEqualTo(JobStatus.FAILED);
+        assertThat(stuck.getResultUrl()).contains("stopped responding");
+        verify(publisher).publish(stuck);
     }
 
     // ── evaluations ──────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { cancelJob, getAllJobs, getJob, getMyJobs, submitJob } from '../api/jobApi'
+import { cancelJob, getAllJobs, getJob, getMyJobs, getQueueStats, retryJob, submitJob } from '../api/jobApi'
 import { useAuth } from '../context/authContext.js'
 
 /*
@@ -84,5 +84,24 @@ export function useCancelJob() {
   return useMutation({
     mutationFn: async (id) => (await cancelJob(id)).data,
     onSuccess: applyJobUpdate,
+  })
+}
+
+/** Run a failed or cancelled job again; resolves with the new job. */
+export function useRetryJob() {
+  const applyJobUpdate = useApplyJobUpdate()
+  return useMutation({
+    mutationFn: async (id) => (await retryJob(id)).data,
+    onSuccess: applyJobUpdate,
+  })
+}
+
+/** Admin: live queue depths. Polled, since queue sizes change without job events. */
+export function useQueueStats(enabled) {
+  return useQuery({
+    queryKey: ['queues'],
+    queryFn: async () => (await getQueueStats()).data,
+    enabled,
+    refetchInterval: 10_000,
   })
 }

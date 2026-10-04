@@ -8,7 +8,7 @@ from ai_worker.rag import SYSTEM_PROMPT, build_user_prompt, to_sources
 from ai_worker.runner import JobRunner
 from ai_worker.vector_store import SearchHit
 
-from .fakes import FakeApi, FakeProvider, FakeStore, Recorder, settings
+from .fakes import CallRecorder, FakeApi, FakeProvider, FakeStore, Recorder, settings
 
 # ── extraction & chunking ────────────────────────────────────────────────────
 
@@ -81,15 +81,19 @@ def test_ingest_embeds_chunks_stores_them_and_marks_document_ready():
     assert result["usage"].input_tokens == 5
 
 
-def test_ingest_failure_marks_document_failed_with_the_reason():
+def test_ingest_failure_fails_the_job_with_the_reason_and_is_not_retried():
+    # A scanned PDF won't have text on the next attempt either: fail now. The API then
+    # marks the document FAILED with this error (see JobService.applyFinish).
     api = FakeApi(document=b"   ")
-    runner = JobRunner(settings(), api, FakeProvider(), Recorder(), FakeStore())
+    retries = CallRecorder()
+    runner = JobRunner(settings(), api, FakeProvider(), Recorder(), FakeStore(), retry=retries)
 
-    assert asyncio.run(runner.handle(ingest_message())) is False
+    assert asyncio.run(runner.handle(ingest_message())) is True
 
-    document_id, report = api.indexed[0]
-    assert report["status"] == "FAILED" and "No text could be extracted" in report["error"]
-    assert api.finished[0][1]["status"] == "FAILED"
+    assert retries.calls == []
+    assert api.indexed == []  # document status is left to the API's final-failure handling
+    result = api.finished[0][1]
+    assert result["status"] == "FAILED" and "No text could be extracted" in result["result"]
 
 
 # ── ask job ──────────────────────────────────────────────────────────────────

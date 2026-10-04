@@ -17,12 +17,25 @@ from .jobs import parse_generate_payload, run_generate
 from .llm import LLMProvider, Usage
 from .pricing import add_costs, cost_usd, embedding_cost_usd
 from .rag import answer_question, sources_json
+from .reliability import is_transient, retry_delay
 from .streaming import DeltaBatcher
 from .vector_store import VectorStore
 
 log = logging.getLogger(__name__)
 
 PublishEvent = Callable[[dict], Awaitable[None]]
+# (message body, next attempt number, delay in seconds) — re-publish for a later attempt
+Retry = Callable[[bytes, int, int], Awaitable[None]]
+# (message body, reason, attempts made) — park a message that will never succeed
+DeadLetter = Callable[[bytes, str, int], Awaitable[None]]
+
+
+async def _no_retry(body: bytes, attempt: int, delay: int) -> None:
+    log.warning("No retry publisher configured; dropping attempt %d", attempt)
+
+
+async def _no_dead_letter(body: bytes, reason: str, attempts: int) -> None:
+    log.warning("No dead-letter publisher configured; dropping message (%s)", reason)
 
 MAX_QUESTION_CHARS = 2_000  # mirrors JobPayloadValidator on the API
 
@@ -73,12 +86,16 @@ class JobRunner:
         provider: LLMProvider | None,
         publish_event: PublishEvent,
         store: VectorStore | None = None,
+        retry: Retry | None = None,
+        dead_letter: DeadLetter | None = None,
     ) -> None:
         self._settings = settings
         self._api = api
         self._provider = provider
         self._publish_event = publish_event
         self._store = store
+        self._retry = retry or _no_retry
+        self._dead_letter = dead_letter or _no_dead_letter
         self._handlers = {
             "AI_GENERATE": self._generate,
             "INGEST_DOCUMENT": self._ingest,
@@ -86,24 +103,32 @@ class JobRunner:
             "EVAL_RUN": self._eval,
         }
 
-    async def handle(self, body: bytes) -> bool:
-        """Process one message. Returns True to ack it, False to drop it (no redelivery)."""
+    async def handle(self, body: bytes, *, attempt: int = 1, redelivered: bool = False) -> bool:
+        """
+        Process one delivery of a job message. Returns True to ack it (done, retried later
+        or dead-lettered — either way this delivery is finished), False to drop it.
+
+        `attempt` counts deliveries made by our own retry policy; `redelivered` is set by
+        RabbitMQ when a previous worker died holding this message.
+        """
         try:
             job = json.loads(body)
             job_id = job["id"]
         except (ValueError, KeyError, TypeError):
-            log.error("Dropping malformed message: %r", body[:200])
-            return False
+            log.error("Dead-lettering malformed message: %r", body[:200])
+            await self._dead_letter(body, "Malformed message", attempt)
+            return True
 
-        # Claim the job. 409/404 mean it was cancelled or deleted while queued — skip it.
+        # Claim the job. 409/404 mean it was cancelled, finished or deleted — skip it.
+        # A redelivery or one of our retries may take over a job left PROCESSING.
         try:
-            await self._api.start(job_id)
+            await self._api.claim(job_id, take_over=redelivered or attempt > 1)
         except JobNotRunnable as err:
             log.info("Skipping job %s: no longer runnable (%s)", job_id, err)
             return True
-        except Exception:
-            log.exception("Could not start job %s", job_id)
-            return False
+        except Exception as err:
+            # Couldn't reach the API: the job is still PENDING, so just try later
+            return await self._retry_or_give_up(job_id, body, attempt, err, claimed=False)
 
         try:
             handler = self._handlers.get(job.get("type"))
@@ -133,13 +158,31 @@ class JobRunner:
             )
             return True
         except Exception as err:
-            reason = describe_error(err)
-            log.warning("Job %s failed: %s", job_id, reason)
-            try:
-                await self._api.finish(job_id, status="FAILED", result=f"Error: {reason}")
-            except Exception:
-                log.exception("Could not mark job %s FAILED", job_id)
-            return False
+            return await self._retry_or_give_up(job_id, body, attempt, err, claimed=True)
+
+    async def _retry_or_give_up(self, job_id: str, body: bytes, attempt: int, err: Exception, *, claimed: bool) -> bool:
+        reason = describe_error(err)
+        delay = retry_delay(attempt) if is_transient(err) else None
+
+        if delay is not None:
+            log.warning("Job %s attempt %d failed (%s); retrying in %ds", job_id, attempt, reason, delay)
+            if claimed:
+                try:
+                    await self._api.schedule_retry(job_id, error=reason, delay_seconds=delay)
+                except Exception:
+                    # The retried delivery may take the job over, so this isn't fatal
+                    log.exception("Could not record the retry for job %s", job_id)
+            await self._retry(body, attempt + 1, delay)
+            return True
+
+        suffix = f" (after {attempt} attempts)" if attempt > 1 else ""
+        log.warning("Job %s failed%s: %s", job_id, suffix, reason)
+        try:
+            await self._api.finish(job_id, status="FAILED", result=f"Error: {reason}{suffix}")
+        except Exception:
+            log.exception("Could not mark job %s FAILED", job_id)
+        await self._dead_letter(body, reason, attempt)
+        return True
 
     # ── AI_GENERATE ──────────────────────────────────────────────────────────
 
@@ -159,24 +202,19 @@ class JobRunner:
         document_id = payload.get("documentId")
         if not isinstance(document_id, str):
             raise ValueError("INGEST_DOCUMENT payload needs a documentId")
-        try:
-            store = self._require_store()
-            data = await self._api.download_document(document_id)
-            pages = extract_pages(data, payload.get("contentType", "text/plain"))
-            chunks = chunk_pages(pages)
-            embeddings = await self._provider.embed(
-                [c.text for c in chunks],
-                model=self._settings.embedding_model,
-                dimensions=self._settings.embedding_dimensions,
-            )
-            await store.replace_chunks(document_id, chunks, embeddings.vectors)
-        except Exception as err:
-            # Tell the documents page why, then let the job fail as usual
-            try:
-                await self._api.report_indexed(document_id, status="FAILED", error=describe_error(err))
-            except Exception:
-                log.exception("Could not mark document %s FAILED", document_id)
-            raise
+        # On failure the document stays PROCESSING while retries are pending; when the job
+        # finally fails, the API marks the document FAILED with the job's error.
+        store = self._require_store()
+        data = await self._api.download_document(document_id)
+        pages = extract_pages(data, payload.get("contentType", "text/plain"))
+        chunks = chunk_pages(pages)
+        embeddings = await self._provider.embed(
+            [c.text for c in chunks],
+            model=self._settings.embedding_model,
+            dimensions=self._settings.embedding_dimensions,
+        )
+        # replace_chunks is atomic per document, so a retry never leaves duplicates
+        await store.replace_chunks(document_id, chunks, embeddings.vectors)
 
         page_count = sum(1 for p in pages if p.number is not None) or 1
         await self._api.report_indexed(

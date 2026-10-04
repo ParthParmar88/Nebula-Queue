@@ -73,6 +73,25 @@ An `EVAL_RUN` job runs a set of test questions with known answers through **the 
 
 Runs record their configuration (top-k, answer/judge/embedding models), stream per-case progress live, and the Evaluations page compares each run with the previous one — e.g. lower top-k from 5 to 2 and see whether correctness or faithfulness moves. The judge's reply is parsed defensively (scores clamped to 0–1; malformed replies mark the case as unscored instead of failing the run).
 
+### Reliability
+
+```text
+                 ┌──────── temporary error (attempt 1) ──▶ ai-job-retry-5s  ─┐  TTL expires,
+ai-job-queue ──▶ AI worker ── temporary error (attempt 2) ──▶ ai-job-retry-30s ─┤  dead-letters back
+     ▲           │                                                              │  to ai-job-queue
+     └───────────┼──────────────────────────────────────────────────────────────┘
+                 └── permanent error, or attempt 3 failed ──▶ job FAILED + message ──▶ ai-job-dlq
+```
+
+- **Retries with backoff:** temporary failures — rate limits, timeouts, provider 5xx, the API or database briefly unreachable — are retried after 5 s and then 30 s (3 attempts). Permanent ones — invalid input, a rejected API key, an exhausted quota (also a 429, but waiting won't help) — fail immediately. While waiting, the job is back in `PENDING` with the error and next attempt time shown in the UI.
+- **One delay queue per backoff step** (TTL + dead-letter back to the work queue), not per-message TTLs on one queue — that avoids head-of-line blocking, where a long delay holds up shorter ones behind it.
+- **Dead-letter queues:** messages that exhaust their retries, fail permanently, or are malformed go to `ai-job-dlq` / `job-dlq` with the reason in headers, instead of being dropped.
+- **At-least-once, but never twice:** RabbitMQ redelivers a message if its worker dies mid-job; the next worker *takes over* the `PROCESSING` job (`POST /internal/worker/jobs/{id}/claim?redelivered=true`). The API refuses to claim a finished or cancelled job, so a job never completes twice; indexing replaces a document's chunks atomically, so a retry never leaves duplicates.
+- **Stuck-job reaper:** jobs `PROCESSING` with no update for 10 minutes (`APP_JOBS_STUCK_AFTER`) are failed, so nothing hangs forever if every worker is gone.
+- **Manual retry:** failed or cancelled jobs have a **Retry** button, which queues a new job linked to the old one (`retryOfJobId`) so the history stays intact.
+- **Scaling:** `docker compose up -d --scale ai-worker=3` runs three AI workers; RabbitMQ spreads jobs across them, each running up to `AI_WORKER_CONCURRENCY` (prefetch) at once.
+- **Visibility:** admins see every queue's depth, consumers and dead letters on the Overview (`GET /api/admin/queues`).
+
 ## Services and Ports
 
 - `client`: [http://localhost:5173](http://localhost:5173)
@@ -229,6 +248,9 @@ No automated tests yet.
 - `PATCH /internal/worker/jobs/{id}/status` (workers; header `X-Worker-Token` must match `app.worker.internal-token`; same query params as above)
 - `POST /internal/worker/jobs/{id}/finish` (workers; JSON `{status: COMPLETED|FAILED, output, resultUrl, model, inputTokens, outputTokens, costUsd, sources}`)
 - `POST /api/jobs/{id}/cancel` (authenticated; only while `PENDING`)
+- `POST /api/jobs/{id}/retry` (authenticated; failed or cancelled jobs) — returns the new job
+- `GET /api/admin/queues` (admin) — depth and consumers of every queue
+- Workers: `POST /internal/worker/jobs/{id}/claim?redelivered=`, `POST /internal/worker/jobs/{id}/retry-scheduled`
 
 Statuses: `PENDING → PROCESSING → COMPLETED | FAILED`, or `PENDING → CANCELLED`.
 
@@ -325,9 +347,9 @@ Example payload in the UI:
 - **No realtime updates in UI:** check API WebSocket endpoint `/ws`, Vite proxy config, and RabbitMQ/worker logs.
 - **Worker not consuming jobs:** verify `job-queue` exists and worker can connect to RabbitMQ.
 - **Worker cannot update status (401/503):** ensure `WORKER_INTERNAL_TOKEN` matches `APP_WORKER_INTERNAL_TOKEN` / `app.worker.internal-token`, and the worker calls `PATCH /internal/worker/jobs/{id}/status` with query params (not a JSON body).
-- **AI jobs fail or stay Pending:** the job page shows the reason (missing/invalid `OPENAI_API_KEY`, quota exceeded, model not available). If they stay `PENDING`, check `docker logs nq-ai-worker` and that `ai-job-queue` has a consumer in the RabbitMQ UI.
+- **AI jobs fail or stay Pending:** the job page shows the reason (missing/invalid `OPENAI_API_KEY`, quota exceeded, model not available). If they stay `PENDING`, check `docker compose logs ai-worker` and that `ai-job-queue` has a consumer (Overview → Queues as admin, or the RabbitMQ UI). A job showing "Retrying automatically" is waiting out a temporary error and will try again on its own.
 - **AI output appears only at the end, not live:** the stream travels API ← `job-stream-events` queue; check `docker logs nq-api` for listener errors.
-- **EMAIL_SEND jobs fail:** set `EMAIL_USER` and `EMAIL_PASS` in `.env` (see [EMAIL_SEND](#email_send-gmail)); use a Gmail **app password**, not your normal login password. Check `docker logs nq-worker` for `Job failed (...):`.
+- **EMAIL_SEND jobs fail:** set `EMAIL_USER` and `EMAIL_PASS` in `.env` (see [EMAIL_SEND](#email_send-gmail)); use a Gmail **app password**, not your normal login password. Check `docker compose logs worker` for `Job failed (...):`.
 - **Integration tests:** `./gradlew test` runs the unit tests and skips the full Spring context test unless you set `RUN_INTEGRATION_TESTS=true` (requires Postgres and RabbitMQ).
 - **"Connecting…" never turns into "Live updates":** the WebSocket login failed — usually an expired token. Log out and back in; check the browser console for `WebSocket error`.
 

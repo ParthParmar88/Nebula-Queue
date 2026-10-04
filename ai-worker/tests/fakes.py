@@ -70,13 +70,19 @@ class FakeApi:
         self.start_error = start_error
         self.document = document
         self.started = []
+        self.take_overs = []
         self.finished = []
         self.indexed = []
+        self.retries = []
 
-    async def start(self, job_id):
+    async def claim(self, job_id, *, take_over=False):
         if self.start_error:
             raise self.start_error
         self.started.append(job_id)
+        self.take_overs.append(take_over)
+
+    async def schedule_retry(self, job_id, *, error, delay_seconds):
+        self.retries.append((job_id, error, delay_seconds))
 
     async def finish(self, job_id, **kwargs):
         self.finished.append((job_id, kwargs))
@@ -109,6 +115,16 @@ class Recorder:
 
     async def __call__(self, event):
         self.events.append(event)
+
+
+class CallRecorder:
+    """Records every call's positional arguments (for the retry / dead-letter publishers)."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, *args):
+        self.calls.append(args)
 
 
 NOT_RUNNABLE = JobNotRunnable("HTTP 409")

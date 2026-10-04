@@ -9,6 +9,7 @@ import signal
 
 import aio_pika
 
+from . import reliability
 from .api import ApiClient
 from .config import Settings
 from .llm import OpenAIProvider
@@ -50,6 +51,33 @@ async def connect_store_with_retry(settings: Settings, attempts: int = 20, delay
     raise RuntimeError("unreachable")
 
 
+async def declare_reliability_topology(channel: aio_pika.abc.AbstractChannel):
+    """Retry delay queues and the dead-letter queue (owned by the AI worker).
+
+    Each delay queue has a TTL; expired messages dead-letter back to the work exchange
+    with the AI routing key, i.e. straight back into ai-job-queue."""
+    await channel.declare_exchange(reliability.WORK_EXCHANGE, aio_pika.ExchangeType.DIRECT, durable=True)
+    retry_exchange = await channel.declare_exchange(reliability.RETRY_EXCHANGE, aio_pika.ExchangeType.DIRECT, durable=True)
+    for delay in reliability.RETRY_DELAYS_SECONDS:
+        queue = await channel.declare_queue(
+            reliability.retry_queue(delay),
+            durable=True,
+            arguments={
+                "x-message-ttl": delay * 1000,
+                "x-dead-letter-exchange": reliability.WORK_EXCHANGE,
+                "x-dead-letter-routing-key": reliability.WORK_ROUTING_KEY,
+            },
+        )
+        await queue.bind(retry_exchange, routing_key=reliability.retry_routing_key(delay))
+
+    dead_letter_exchange = await channel.declare_exchange(
+        reliability.DEAD_LETTER_EXCHANGE, aio_pika.ExchangeType.DIRECT, durable=True
+    )
+    dlq = await channel.declare_queue(reliability.DEAD_LETTER_QUEUE, durable=True)
+    await dlq.bind(dead_letter_exchange, routing_key=reliability.DEAD_LETTER_ROUTING_KEY)
+    return retry_exchange, dead_letter_exchange
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = Settings.from_env()
@@ -71,16 +99,51 @@ async def main() -> None:
         queue = await channel.declare_queue(AI_QUEUE, durable=True)
         events = await channel.declare_exchange(EVENTS_EXCHANGE, aio_pika.ExchangeType.DIRECT, durable=True)
 
+        retry_exchange, dead_letter_exchange = await declare_reliability_topology(channel)
+
         async def publish_event(event: dict) -> None:
             await events.publish(
                 aio_pika.Message(json.dumps(event).encode(), content_type="application/json"),
                 routing_key=STREAM_ROUTING_KEY,
             )
 
-        runner = JobRunner(settings, api, provider, publish_event, store)
+        async def publish_retry(body: bytes, attempt: int, delay: int) -> None:
+            # Sits in the delay queue until its TTL expires, then dead-letters back to ai-job-queue
+            await retry_exchange.publish(
+                aio_pika.Message(
+                    body,
+                    content_type="application/json",
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    headers={"x-attempt": attempt},
+                ),
+                routing_key=reliability.retry_routing_key(delay),
+            )
+
+        async def publish_dead_letter(body: bytes, reason: str, attempts: int) -> None:
+            await dead_letter_exchange.publish(
+                aio_pika.Message(
+                    body,
+                    content_type="application/json",
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    headers={"x-error": reason[:500], "x-attempts": attempts},
+                ),
+                routing_key=reliability.DEAD_LETTER_ROUTING_KEY,
+            )
+
+        runner = JobRunner(
+            settings, api, provider, publish_event, store, retry=publish_retry, dead_letter=publish_dead_letter
+        )
 
         async def on_message(message: aio_pika.abc.AbstractIncomingMessage) -> None:
-            if await runner.handle(message.body):
+            attempt = int((message.headers or {}).get("x-attempt", 1))
+            try:
+                ok = await runner.handle(message.body, attempt=attempt, redelivered=message.redelivered)
+            except Exception:
+                # e.g. the broker refused a retry publish: let RabbitMQ redeliver this message
+                log.exception("Unexpected error handling a message; requeueing it")
+                await message.reject(requeue=True)
+                return
+            if ok:
                 await message.ack()
             else:
                 await message.reject(requeue=False)
