@@ -1,5 +1,7 @@
 # Nebula Queue
 
+[![CI](https://github.com/ParthParmar88/Nebula-Queue/actions/workflows/ci.yml/badge.svg)](https://github.com/ParthParmar88/Nebula-Queue/actions/workflows/ci.yml)
+
 Nebula Queue is a job platform for AI workloads: submit LLM and background jobs, process them asynchronously on dedicated workers, and watch status — and generated text — stream live into the UI.
 
 LLM calls are slow, expensive and rate-limited, which is exactly what a durable queue is for: requests are persisted, run by a pool of workers at a controlled concurrency, retried on transient errors, and tracked per job with token usage and cost.
@@ -200,6 +202,8 @@ OPENAI_API_KEY=sk-... WORKER_INTERNAL_TOKEN=dev-worker-token API_URL=http://loca
 ```
 
 ## Build, Test, and Lint
+
+**CI:** every push to `main` and every pull request runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on GitHub Actions — four parallel jobs: API tests (JUnit), AI worker tests (pytest), client lint + production build, and a Node worker syntax check. Tests use fakes for the LLM and message broker, so CI needs no secrets and spends no API credits. The same commands run locally:
 
 ### API
 

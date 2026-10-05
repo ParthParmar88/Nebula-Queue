@@ -1,0 +1,129 @@
+# Continuous integration for Nebula Queue.
+# On every push and pull request, GitHub starts fresh Linux machines and builds + tests
+# each part of the project in parallel. Anything after a # is a comment GitHub ignores.
+
+name: CI
+
+# ── When to run ───────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main]      # every push to main
+  pull_request:           # every pull request, before it's merged
+  workflow_dispatch:      # a "Run workflow" button in the Actions tab
+
+# The jobs only read the code. Granting the minimum is good security practice.
+permissions:
+  contents: read
+
+# Two quick pushes in a row? Cancel the older run — its result no longer matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── What to run: four independent jobs, each on its own fresh machine, in parallel ──
+jobs:
+
+  api:
+    name: API · Java tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: api          # every `run:` below starts in api/
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Install Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin         # the free OpenJDK build (same as the Docker image)
+          java-version: "21"
+          cache: gradle                 # reuse downloaded dependencies between runs
+
+      - name: Run tests
+        run: ./gradlew test --no-daemon
+
+      - name: Save the test report if something failed
+        if: failure()                   # only runs when an earlier step failed
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-test-report
+          path: api/build/reports/tests/test
+          retention-days: 7
+
+  ai-worker:
+    name: AI worker · Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ai-worker
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Install Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"        # same version as the worker's Docker image
+          cache: pip
+          cache-dependency-path: ai-worker/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q        # uses fake LLMs: no API key, no tokens spent
+
+  client:
+    name: Client · lint and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Install Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci                     # exact versions from package-lock.json
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+  worker:
+    name: Worker · Node syntax check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: workers
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Install Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: workers/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The Node worker has no unit tests yet; at least make sure every file parses
+      - name: Check syntax
+        run: for f in index.js handlers/*.js; do node --check "$f"; done
